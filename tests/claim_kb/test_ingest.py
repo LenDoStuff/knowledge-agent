@@ -7,7 +7,7 @@ from claim_kb.ingest import IngestionServices, ingest_claim_pdf_with_services
 from claim_kb.schemas import (
     ChunkSearchResult,
     DocumentMetadata,
-    OcrPage,
+    PageText,
     PageBoundaryDecision,
     PageRange,
 )
@@ -15,29 +15,33 @@ from claim_kb.storage import read_jsonl
 
 
 class FakeOcrClient:
-    def extract_pages(self, claim_id: str, pdf_path: Path) -> list[OcrPage]:
+    def extract_pages(self, claim_id: str, pdf_path: Path) -> list[PageText]:
         return [
-            OcrPage(
+            PageText(
                 claim_id=claim_id,
                 page_number=1,
+                page_id=f"{claim_id}:p1",
                 text="First notice of loss for Alice Example.",
                 word_count=7,
             ),
-            OcrPage(
+            PageText(
                 claim_id=claim_id,
                 page_number=2,
+                page_id=f"{claim_id}:p2",
                 text="The same loss notice continues with damage details.",
                 word_count=8,
             ),
-            OcrPage(
+            PageText(
                 claim_id=claim_id,
                 page_number=3,
+                page_id=f"{claim_id}:p3",
                 text="Repair invoice from Contoso Garage.",
                 word_count=5,
             ),
-            OcrPage(
+            PageText(
                 claim_id=claim_id,
                 page_number=4,
+                page_id=f"{claim_id}:p4",
                 text="Invoice line items and total amount.",
                 word_count=6,
             ),
@@ -77,7 +81,7 @@ class FakeClassifier:
             confidence=0.9,
         )
 
-    def extract_document_metadata(self, document):
+    def extract_document_metadata(self, document, chunks):
         parties = (
             [{"name": "Alice Example", "role": "insured"}]
             if document.document_type == "fnol"
@@ -90,6 +94,7 @@ class FakeClassifier:
                     "month": None,
                     "day": None,
                     "sentence": "Alice Example reported damage details.",
+                    "source_ref": chunks[0].source_ref,
                 }
             ]
             if document.document_type == "fnol"
@@ -99,6 +104,7 @@ class FakeClassifier:
                     "month": None,
                     "day": None,
                     "sentence": "Contoso Garage listed invoice line items.",
+                    "source_ref": chunks[0].source_ref,
                 }
             ]
         )
@@ -188,15 +194,23 @@ def test_ingestion_pipeline_creates_expected_outputs(tmp_path, sample_pdf):
     assert inventory[0].events[0].year is None
     assert inventory[0].events[0].month is None
     assert inventory[0].events[0].day is None
+    assert inventory[0].events[0].source_ref == (
+        "CLM-001/DOC-001#DOC-001-CHUNK-001"
+    )
     assert inventory[1].document_type == "invoice"
 
     ocr_rows = read_jsonl(root / "pages.jsonl")
     chunk_rows = read_jsonl(root / "chunks.jsonl")
     assert len(ocr_rows) == 4
+    assert ocr_rows[0]["page_id"] == "CLM-001:p1"
     assert len(chunk_rows) == 2
     assert chunk_rows[0]["embedding"]
     assert chunk_rows[0]["document_id"] == "DOC-001"
     assert chunk_rows[0]["page_range"] == {"start_page": 1, "end_page": 2}
+    assert chunk_rows[0]["page_ids"] == ["CLM-001:p1", "CLM-001:p2"]
+    assert chunk_rows[0]["source_ref"] == (
+        "CLM-001/DOC-001#DOC-001-CHUNK-001"
+    )
     assert vector_store.indexed_chunks[0].chunk_id == "DOC-001-CHUNK-001"
 
     page_2_call = classifier.boundary_calls[1]

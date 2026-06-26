@@ -3,7 +3,13 @@ from types import SimpleNamespace
 import pytest
 
 from claim_kb.classify import AzureClaimClassifier, ExtractedDocumentMetadata
-from claim_kb.schemas import LogicalDocument, OcrPage, PageBoundaryDecision, PageRange
+from claim_kb.schemas import (
+    DocumentChunk,
+    LogicalDocument,
+    PageBoundaryDecision,
+    PageRange,
+    PageText,
+)
 
 
 class FakeResponses:
@@ -45,14 +51,16 @@ def test_classify_page_boundary_uses_responses_structured_parse():
     )
 
     decision = classifier.classify_page_boundary(
-        page=OcrPage(
+        page=PageText(
             claim_id="CLM-001",
             page_number=2,
+            page_id="CLM-001:p2",
             text="Repair Invoice\nTotal: 850.00",
         ),
-        prior_page=OcrPage(
+        prior_page=PageText(
             claim_id="CLM-001",
             page_number=1,
+            page_id="CLM-001:p1",
             text="First Notice of Loss",
         ),
         current_document=LogicalDocument(
@@ -88,6 +96,7 @@ def test_extract_document_metadata_uses_responses_structured_parse():
                         "month": 6,
                         "day": None,
                         "sentence": "Sample Body Shop listed repair work.",
+                        "source_ref": "CLM-001/DOC-002#DOC-002-CHUNK-001",
                     },
                 ],
                 document_type="invoice",
@@ -100,16 +109,31 @@ def test_extract_document_metadata_uses_responses_structured_parse():
         document_type="unknown",
         page_range=PageRange(start_page=2, end_page=2),
         pages=[
-            OcrPage(
+            PageText(
                 claim_id="CLM-001",
                 page_number=2,
+                page_id="CLM-001:p2",
                 text="Repair Invoice\nVendor: Sample Body Shop",
             )
         ],
         file_name="DOC-002_invoice.pdf",
     )
 
-    metadata = classifier.extract_document_metadata(document)
+    chunks = [
+        DocumentChunk(
+            claim_id="CLM-001",
+            document_id="DOC-002",
+            chunk_id="DOC-002-CHUNK-001",
+            source_ref="CLM-001/DOC-002#DOC-002-CHUNK-001",
+            chunk_index=0,
+            document_type="unknown",
+            page_range=PageRange(start_page=2, end_page=2),
+            page_ids=["CLM-001:p2"],
+            text="Repair Invoice\nVendor: Sample Body Shop",
+        )
+    ]
+
+    metadata = classifier.extract_document_metadata(document, chunks)
 
     call = responses.calls[0]
     prompt_text = "\n".join(message["content"] for message in call["input"])
@@ -123,6 +147,7 @@ def test_extract_document_metadata_uses_responses_structured_parse():
     assert metadata.events[0].year == 2026
     assert metadata.events[0].month == 6
     assert metadata.events[0].day is None
+    assert metadata.events[0].source_ref == chunks[0].source_ref
 
 
 def test_parse_response_raises_when_parsed_output_is_missing():

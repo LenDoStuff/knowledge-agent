@@ -8,12 +8,13 @@ from pydantic import BaseModel, StringConstraints
 
 from claim_kb.config import ClaimKbSettings
 from claim_kb.schemas import (
+    DocumentChunk,
     DocumentEvent,
     DocumentMetadata,
     DocumentParty,
     LogicalDocument,
-    OcrPage,
     PageBoundaryDecision,
+    PageText,
 )
 
 
@@ -25,13 +26,17 @@ Text = Annotated[str, StringConstraints(strip_whitespace=True)]
 class ClaimClassifier(Protocol):
     def classify_page_boundary(
         self,
-        page: OcrPage,
-        prior_page: OcrPage | None,
+        page: PageText,
+        prior_page: PageText | None,
         current_document: LogicalDocument | None,
     ) -> PageBoundaryDecision:
         ...
 
-    def extract_document_metadata(self, document: LogicalDocument) -> DocumentMetadata:
+    def extract_document_metadata(
+        self,
+        document: LogicalDocument,
+        chunks: list[DocumentChunk],
+    ) -> DocumentMetadata:
         ...
 
 
@@ -58,8 +63,8 @@ class AzureClaimClassifier:
 
     def classify_page_boundary(
         self,
-        page: OcrPage,
-        prior_page: OcrPage | None,
+        page: PageText,
+        prior_page: PageText | None,
         current_document: LogicalDocument | None,
     ) -> PageBoundaryDecision:
         if prior_page is None:
@@ -102,9 +107,15 @@ class AzureClaimClassifier:
         )
         return decision.model_copy(update={"page_number": page.page_number})
 
-    def extract_document_metadata(self, document: LogicalDocument) -> DocumentMetadata:
-        text = "\n\n".join(
-            f"Page {page.page_number}\n{page.text}" for page in document.pages
+    def extract_document_metadata(
+        self,
+        document: LogicalDocument,
+        chunks: list[DocumentChunk],
+    ) -> DocumentMetadata:
+        if not chunks:
+            raise ValueError(f"Document {document.id} has no chunks")
+        chunk_text = "\n\n".join(
+            f"Source ref: {chunk.source_ref}\n{chunk.text}" for chunk in chunks
         )
         extracted = self._parse_response(
             system=(
@@ -117,16 +128,24 @@ class AzureClaimClassifier:
                 "role cannot be stated. For each event, fill year, month, and "
                 "day only when that part is explicit or unambiguous; use no "
                 "value for unknown parts. For date ranges, keep the range in "
-                "the event sentence.\n\n"
+                "the event sentence. Every event must use the source_ref of the "
+                "provided chunk that supports it.\n\n"
                 f"Document id: {document.id}\n"
                 f"Page range: {document.page_range.start_page}-"
                 f"{document.page_range.end_page}\n"
                 f"Initial title: {document.title}\n"
                 f"Initial document_type: {document.document_type}\n\n"
-                f"OCR text:\n{_clip(text, 10000)}"
+                f"Chunks:\n{_clip(chunk_text, 10000)}"
             ),
             response_model=ExtractedDocumentMetadata,
         )
+        valid_refs = {chunk.source_ref for chunk in chunks}
+        for event in extracted.events:
+            if event.source_ref not in valid_refs:
+                raise ValueError(
+                    f"Event source_ref is not a chunk in {document.id}: "
+                    f"{event.source_ref}"
+                )
         if document.file_name is None:
             raise ValueError(f"Document {document.id} has no split PDF file name")
         return DocumentMetadata(

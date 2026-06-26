@@ -22,13 +22,15 @@
           "year": 2026,
           "month": 6,
           "day": 1,
-          "sentence": "The sample vehicle was involved in a low-speed parking lot collision."
+          "sentence": "The sample vehicle was involved in a low-speed parking lot collision.",
+          "source_ref": "CLM-SAMPLE-001/DOC-001#DOC-001-CHUNK-001"
         },
         {
           "year": null,
           "month": null,
           "day": null,
-          "sentence": "Casey Sample reported the loss to Example Mutual."
+          "sentence": "Casey Sample reported the loss to Example Mutual.",
+          "source_ref": "CLM-SAMPLE-001/DOC-001#DOC-001-CHUNK-001"
         }
       ],
       "document_type": "fnol",
@@ -57,7 +59,8 @@
           "year": null,
           "month": null,
           "day": null,
-          "sentence": "Sample Body Shop listed repair labor and front bumper parts."
+          "sentence": "Sample Body Shop listed repair labor and front bumper parts.",
+          "source_ref": "CLM-SAMPLE-001/DOC-002#DOC-002-CHUNK-001"
         }
       ],
       "document_type": "invoice",

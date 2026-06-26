@@ -102,15 +102,24 @@ def ingest_claim_pdf_with_services(
             root / "documents",
         )
 
+    with log_step(log, "chunk", root):
+        chunks = chunk_documents(claim_id, logical_documents)
+
     with log_step(log, "metadata", root):
         documents: list[DocumentMetadata] = []
         for logical_document in logical_documents:
-            metadata = services.classifier.extract_document_metadata(logical_document)
+            document_chunks = [
+                chunk
+                for chunk in chunks
+                if chunk.document_id == logical_document.id
+            ]
+            metadata = services.classifier.extract_document_metadata(
+                logical_document,
+                document_chunks,
+            )
             documents.append(metadata)
-
-    with log_step(log, "chunk", root):
-        metadata_by_id = {document.id: document for document in documents}
-        chunks = chunk_documents(claim_id, logical_documents, metadata_by_id)
+            for chunk in document_chunks:
+                chunk.document_type = metadata.document_type
 
     with log_step(log, "embed", root):
         try:

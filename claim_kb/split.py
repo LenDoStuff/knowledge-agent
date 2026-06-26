@@ -7,19 +7,19 @@ from pathlib import Path
 from pypdf import PdfReader, PdfWriter
 
 from claim_kb.classify import ClaimClassifier
-from claim_kb.schemas import LogicalDocument, OcrPage, PageRange
+from claim_kb.schemas import LogicalDocument, PageRange, PageText
 from claim_kb.storage import slugify
 
 
 def group_logical_documents(
     claim_id: str,
-    pages: list[OcrPage],
+    pages: list[PageText],
     classifier: ClaimClassifier,
 ) -> list[LogicalDocument]:
     sorted_pages = sorted(pages, key=lambda item: item.page_number)
     documents: list[LogicalDocument] = []
     current: LogicalDocument | None = None
-    prior_page: OcrPage | None = None
+    prior_page: PageText | None = None
 
     for page in sorted_pages:
         decision = classifier.classify_page_boundary(page, prior_page, current)

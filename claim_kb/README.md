@@ -34,11 +34,13 @@ emails, loss adjuster reports, invoices, or other claim documents.
    context to decide whether it starts a new document or continues the previous
    document.
 4. Writes split PDF files for each logical document.
-5. Extracts metadata for each logical document:
+5. Chunks OCR text by document and page range, assigning stable page IDs and
+   chunk citation references.
+6. Extracts metadata for each logical document:
    `id`, `title`, `summary`, `involved_parties`, `events`,
    `document_type`, and `page_range`.
-   Event dates use nullable numeric `year`, `month`, and `day` fields.
-6. Chunks OCR text by document and page range.
+   Event dates use nullable numeric `year`, `month`, and `day` fields, and every
+   event cites a supporting chunk through `source_ref`.
 7. Embeds each chunk with Snowflake Cortex `AI_EMBED`.
 8. Stores chunk vectors in a claim-local Chroma vector store.
 9. Exposes listing, search, and chunk-read functions through `claim_kb.api`.
@@ -76,8 +78,9 @@ Important output files:
 - `source/claim.pdf`: preserved source PDF
 - `documents/*.pdf`: logical document PDFs split from the source
 - `manifest.json`: claim manifest and one metadata record per logical document
-- `pages.jsonl`: OCR text and page details
-- `chunks.jsonl`: chunk text, embeddings, document IDs, and page ranges
+- `pages.jsonl`: OCR text and stable page IDs such as `CLM-001:p1`
+- `chunks.jsonl`: chunk text, embeddings, page IDs, and stable citation
+  references such as `CLM-001/DOC-001#DOC-001-CHUNK-001`
 - `index/chroma/`: local vector index for retrieval
 - `run_log.json`: step-level ingestion status
 
@@ -132,6 +135,24 @@ from claim_kb.api import (
     search_claim_file,
 )
 ```
+
+For a local research agent that reads persisted output without Azure,
+Snowflake, or Chroma, use the lexical knowledge store:
+
+```python
+from claim_kb import ClaimKbKnowledgeStore
+
+store = ClaimKbKnowledgeStore("data/claims/CLM-001")
+items = store.search("repair invoice total", top_k=8)
+page = store.get_page(items[0].page_ids[0])
+document = store.get_document(items[0].document_id)
+
+print(items[0].source_ref)
+```
+
+`ClaimKbKnowledgeStore.search()` searches chunk text, document title, document
+summary, and document type. It returns `KnowledgeItem` objects containing the
+document metadata, page IDs, and citation-ready `source_ref`.
 
 Core functions:
 

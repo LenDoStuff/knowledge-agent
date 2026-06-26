@@ -12,7 +12,11 @@ The sample uses fake claim ID `CLM-SAMPLE-001` and two fake documents:
 
 Document metadata includes party roles and event sentences. Event dates use
 nullable numeric `year`, `month`, and `day` fields so partial dates can stay
-partial.
+partial. Every event has a `source_ref` pointing to its supporting chunk.
+
+Pages use stable IDs such as `CLM-SAMPLE-001:p1`. Chunks list their source page
+IDs and use citation references such as
+`CLM-SAMPLE-001/DOC-001#DOC-001-CHUNK-001`.
 
 The embeddings in `sample_output/chunks.jsonl` are tiny deterministic
 vectors only to show the schema shape. They are not real model output and should
