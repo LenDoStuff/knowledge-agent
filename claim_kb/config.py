@@ -19,7 +19,7 @@ class ClaimKbSettings:
     data_root: Path
     ai_project_endpoint: str | None
     document_intelligence_endpoint: str | None
-    chat_deployment: str | None
+    openai_deployment: str | None
     tenant_id: str | None
     snowflake_connection_name: str
     snowflake_embedding_model: str
@@ -32,7 +32,7 @@ class ClaimKbSettings:
             document_intelligence_endpoint=_empty_to_none(
                 os.getenv("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT")
             ),
-            chat_deployment=_empty_to_none(os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT")),
+            openai_deployment=_empty_to_none(os.getenv("AZURE_OPENAI_DEPLOYMENT")),
             tenant_id=_empty_to_none(os.getenv("AZURE_TENANT_ID")),
             snowflake_connection_name=(
                 _empty_to_none(os.getenv("SNOWFLAKE_CONNECTION_NAME"))
@@ -53,7 +53,7 @@ class ClaimKbSettings:
                     "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT",
                     self.document_intelligence_endpoint,
                 ),
-                ("AZURE_OPENAI_CHAT_DEPLOYMENT", self.chat_deployment),
+                ("AZURE_OPENAI_DEPLOYMENT", self.openai_deployment),
             ]
             if not value
         ]

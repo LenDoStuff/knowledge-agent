@@ -25,6 +25,10 @@ working code mantra.
   claim_kb/
     README.md
     *.py
+  examples/
+    claim_kb/
+      README.md
+      sample_output/
   tests/
     claim_kb/
       test_*.py
@@ -40,6 +44,10 @@ The only implemented module is [`claim_kb`](claim_kb/README.md). It preserves a
 source claim PDF, runs OCR, splits logical documents, extracts metadata, chunks
 text, embeds chunks with Snowflake Cortex, stores vectors in Chroma, and exposes
 retrieval APIs for later modules.
+
+Synthetic example output is available in
+[`examples/claim_kb`](examples/claim_kb/README.md). These files are hand-written
+documentation examples, not runtime output or test fixtures.
 
 Run ingestion with:
 

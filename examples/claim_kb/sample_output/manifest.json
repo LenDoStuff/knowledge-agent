@@ -1,0 +1,76 @@
+{
+  "claim_id": "CLM-SAMPLE-001",
+  "root_path": "data/claims/CLM-SAMPLE-001",
+  "original_pdf_path": "data/claims/CLM-SAMPLE-001/source/claim.pdf",
+  "documents": [
+    {
+      "id": "DOC-001",
+      "title": "First Notice of Loss",
+      "summary": "Synthetic notice describing a sample collision claim.",
+      "involved_parties": [
+        {
+          "name": "Example Mutual",
+          "role": "insurer"
+        },
+        {
+          "name": "Casey Sample",
+          "role": "insured"
+        }
+      ],
+      "events": [
+        {
+          "year": 2026,
+          "month": 6,
+          "day": 1,
+          "sentence": "The sample vehicle was involved in a low-speed parking lot collision."
+        },
+        {
+          "year": null,
+          "month": null,
+          "day": null,
+          "sentence": "Casey Sample reported the loss to Example Mutual."
+        }
+      ],
+      "document_type": "fnol",
+      "page_range": {
+        "start_page": 1,
+        "end_page": 1
+      },
+      "file_name": "DOC-001_fnol.pdf"
+    },
+    {
+      "id": "DOC-002",
+      "title": "Repair Invoice",
+      "summary": "Synthetic invoice listing sample repair labor and parts.",
+      "involved_parties": [
+        {
+          "name": "Sample Body Shop",
+          "role": "repair vendor"
+        },
+        {
+          "name": "Casey Sample",
+          "role": "customer"
+        }
+      ],
+      "events": [
+        {
+          "year": null,
+          "month": null,
+          "day": null,
+          "sentence": "Sample Body Shop listed repair labor and front bumper parts."
+        }
+      ],
+      "document_type": "invoice",
+      "page_range": {
+        "start_page": 2,
+        "end_page": 2
+      },
+      "file_name": "DOC-002_invoice.pdf"
+    }
+  ],
+  "chunk_count": 2,
+  "vector_store_path": "data/claims/CLM-SAMPLE-001/index/chroma",
+  "embedding_provider": "snowflake",
+  "embedding_model": "snowflake-arctic-embed-l-v2.0",
+  "created_at": "2026-06-26T12:00:00Z"
+}

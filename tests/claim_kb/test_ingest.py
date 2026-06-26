@@ -21,28 +21,24 @@ class FakeOcrClient:
                 claim_id=claim_id,
                 page_number=1,
                 text="First notice of loss for Alice Example.",
-                lines=["First notice of loss for Alice Example."],
                 word_count=7,
             ),
             OcrPage(
                 claim_id=claim_id,
                 page_number=2,
                 text="The same loss notice continues with damage details.",
-                lines=["The same loss notice continues with damage details."],
                 word_count=8,
             ),
             OcrPage(
                 claim_id=claim_id,
                 page_number=3,
                 text="Repair invoice from Contoso Garage.",
-                lines=["Repair invoice from Contoso Garage."],
                 word_count=5,
             ),
             OcrPage(
                 claim_id=claim_id,
                 page_number=4,
                 text="Invoice line items and total amount.",
-                lines=["Invoice line items and total amount."],
                 word_count=6,
             ),
         ]
@@ -82,12 +78,36 @@ class FakeClassifier:
         )
 
     def extract_document_metadata(self, document):
-        parties = ["Alice Example"] if document.document_type == "fnol" else ["Contoso Garage"]
+        parties = (
+            [{"name": "Alice Example", "role": "insured"}]
+            if document.document_type == "fnol"
+            else [{"name": "Contoso Garage", "role": "repair vendor"}]
+        )
+        events = (
+            [
+                {
+                    "year": None,
+                    "month": None,
+                    "day": None,
+                    "sentence": "Alice Example reported damage details.",
+                }
+            ]
+            if document.document_type == "fnol"
+            else [
+                {
+                    "year": None,
+                    "month": None,
+                    "day": None,
+                    "sentence": "Contoso Garage listed invoice line items.",
+                }
+            ]
+        )
         return DocumentMetadata(
             id=document.id,
             title=document.title,
             summary=f"Summary for {document.title}",
             involved_parties=parties,
+            events=events,
             document_type=document.document_type,
             page_range=document.page_range,
             file_name=document.file_name,
@@ -133,7 +153,7 @@ def test_ingestion_pipeline_creates_expected_outputs(tmp_path, sample_pdf):
         data_root=tmp_path / "claims",
         ai_project_endpoint="https://example.services.ai.azure.com/api/projects/proj",
         document_intelligence_endpoint="https://example.cognitiveservices.azure.com",
-        chat_deployment="gpt-test",
+        openai_deployment="gpt-test",
         tenant_id=None,
         snowflake_connection_name="default",
         snowflake_embedding_model="snowflake-arctic-embed-l-v2.0",
@@ -155,7 +175,7 @@ def test_ingestion_pipeline_creates_expected_outputs(tmp_path, sample_pdf):
     )
 
     root = tmp_path / "claims" / "CLM-001"
-    assert (root / "original" / "original_claim_file.pdf").exists()
+    assert (root / "source" / "claim.pdf").exists()
     assert (root / "documents" / "DOC-001_fnol.pdf").exists()
     assert (root / "documents" / "DOC-002_invoice.pdf").exists()
     assert len(PdfReader(str(root / "documents" / "DOC-001_fnol.pdf")).pages) == 2
@@ -164,10 +184,14 @@ def test_ingestion_pipeline_creates_expected_outputs(tmp_path, sample_pdf):
     inventory = claim_file.documents
     assert [document.id for document in inventory] == ["DOC-001", "DOC-002"]
     assert inventory[0].page_range == PageRange(start_page=1, end_page=2)
+    assert inventory[0].involved_parties[0].role == "insured"
+    assert inventory[0].events[0].year is None
+    assert inventory[0].events[0].month is None
+    assert inventory[0].events[0].day is None
     assert inventory[1].document_type == "invoice"
 
-    ocr_rows = read_jsonl(root / "ocr" / "pages.jsonl")
-    chunk_rows = read_jsonl(root / "chunks" / "chunks.jsonl")
+    ocr_rows = read_jsonl(root / "pages.jsonl")
+    chunk_rows = read_jsonl(root / "chunks.jsonl")
     assert len(ocr_rows) == 4
     assert len(chunk_rows) == 2
     assert chunk_rows[0]["embedding"]
@@ -179,9 +203,9 @@ def test_ingestion_pipeline_creates_expected_outputs(tmp_path, sample_pdf):
     assert page_2_call[1].page_number == 1
     assert page_2_call[2].id == "DOC-001"
 
-    assert (root / "metadata" / "claim_file.json").exists()
+    assert (root / "manifest.json").exists()
     assert claim_file.embedding_provider == "snowflake"
     assert claim_file.embedding_model == "fake-snowflake-model"
-    assert (root / "metadata" / "document_inventory.json").exists()
-    assert (root / "logs" / "ingestion_log.json").exists()
+    assert not (root / "metadata").exists()
+    assert (root / "run_log.json").exists()
     assert claim_file.chunk_count == 2

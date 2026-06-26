@@ -10,7 +10,9 @@ from claim_kb.api import (
 from claim_kb.schemas import (
     ChunkSearchResult,
     DocumentChunk,
+    DocumentEvent,
     DocumentMetadata,
+    DocumentParty,
     StructuredClaimFile,
 )
 
@@ -18,7 +20,9 @@ __all__ = [
     "ChunkSearchResult",
     "ClaimKbApi",
     "DocumentChunk",
+    "DocumentEvent",
     "DocumentMetadata",
+    "DocumentParty",
     "StructuredClaimFile",
     "ingest_claim_pdf",
     "list_claim_documents",

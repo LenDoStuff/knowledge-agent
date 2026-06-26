@@ -1,5 +1,8 @@
-from claim_kb import ClaimKbApi, search_claim_file
+import pytest
+
+from claim_kb import ClaimKbApi, DocumentEvent, DocumentParty, search_claim_file
 from claim_kb.config import ClaimKbSettings
+from claim_kb.exceptions import ChunkNotFoundError, DocumentNotFoundError
 from claim_kb.schemas import (
     ChunkSearchResult,
     DocumentChunk,
@@ -10,7 +13,6 @@ from claim_kb.schemas import (
 from claim_kb.storage import (
     ensure_claim_dirs,
     write_claim_metadata,
-    write_document_inventory,
     write_jsonl,
 )
 
@@ -55,22 +57,29 @@ class ClosingVectorStore:
 def test_claim_kb_api_supports_internal_module_usage(tmp_path):
     data_root = tmp_path / "claims"
     root = ensure_claim_dirs(data_root, "CLM-001")
-    write_document_inventory(
-        root,
-        [
-            DocumentMetadata(
-                id="DOC-002",
-                title="Repair Invoice",
-                summary="Invoice summary",
-                involved_parties=["Contoso Garage"],
-                document_type="invoice",
-                page_range=PageRange(start_page=2, end_page=2),
-                file_name="DOC-002_invoice.pdf",
-            )
-        ],
-    )
+    documents = [
+        DocumentMetadata(
+            id="DOC-002",
+            title="Repair Invoice",
+            summary="Invoice summary",
+            involved_parties=[
+                {"name": "Contoso Garage", "role": "repair vendor"},
+            ],
+            events=[
+                {
+                    "year": 2026,
+                    "month": 6,
+                    "day": None,
+                    "sentence": "Contoso Garage issued a repair invoice.",
+                },
+            ],
+            document_type="invoice",
+            page_range=PageRange(start_page=2, end_page=2),
+            file_name="DOC-002_invoice.pdf",
+        )
+    ]
     write_jsonl(
-        root / "chunks" / "chunks.jsonl",
+        root / "chunks.jsonl",
         [
             DocumentChunk(
                 claim_id="CLM-001",
@@ -89,10 +98,10 @@ def test_claim_kb_api_supports_internal_module_usage(tmp_path):
         StructuredClaimFile(
             claim_id="CLM-001",
             root_path=str(root),
-            original_pdf_path=str(root / "original" / "original_claim_file.pdf"),
-            documents=[],
+            original_pdf_path=str(root / "source" / "claim.pdf"),
+            documents=documents,
             chunk_count=1,
-            vector_store_path=str(root / "vector_store" / "chroma"),
+            vector_store_path=str(root / "index" / "chroma"),
             embedding_provider="snowflake",
             embedding_model="stored-snowflake-model",
         ),
@@ -101,7 +110,7 @@ def test_claim_kb_api_supports_internal_module_usage(tmp_path):
         data_root=data_root,
         ai_project_endpoint="https://example.services.ai.azure.com/api/projects/proj",
         document_intelligence_endpoint="https://example.cognitiveservices.azure.com",
-        chat_deployment="gpt-test",
+        openai_deployment="gpt-test",
         tenant_id=None,
         snowflake_connection_name="default",
         snowflake_embedding_model="configured-snowflake-model",
@@ -134,6 +143,10 @@ def test_claim_kb_api_supports_internal_module_usage(tmp_path):
     )
 
     assert documents[0].title == "Repair Invoice"
+    assert documents[0].involved_parties[0].role == "repair vendor"
+    assert documents[0].events[0].year == 2026
+    assert documents[0].events[0].month == 6
+    assert documents[0].events[0].day is None
     assert results[0].document_id == "DOC-002"
     assert chunk.chunk_id == "DOC-002-CHUNK-001"
     assert model_log == ["stored-snowflake-model"]
@@ -143,4 +156,43 @@ def test_claim_kb_api_supports_internal_module_usage(tmp_path):
 
 def test_package_level_imports_expose_api_facade():
     assert ClaimKbApi.__name__ == "ClaimKbApi"
+    assert DocumentEvent.__name__ == "DocumentEvent"
+    assert DocumentParty.__name__ == "DocumentParty"
     assert callable(search_claim_file)
+
+
+def test_read_document_chunk_errors(tmp_path):
+    data_root = tmp_path / "claims"
+    root = ensure_claim_dirs(data_root, "CLM-001")
+    write_jsonl(
+        root / "chunks.jsonl",
+        [
+            DocumentChunk(
+                claim_id="CLM-001",
+                document_id="DOC-001",
+                chunk_id="DOC-001-CHUNK-001",
+                chunk_index=0,
+                document_type="fnol",
+                page_range=PageRange(start_page=1, end_page=1),
+                text="First notice of loss",
+                embedding=[0.1],
+            ).model_dump(mode="json")
+        ],
+    )
+    api = ClaimKbApi(
+        settings=ClaimKbSettings(
+            data_root=data_root,
+            ai_project_endpoint=None,
+            document_intelligence_endpoint=None,
+            openai_deployment=None,
+            tenant_id=None,
+            snowflake_connection_name="default",
+            snowflake_embedding_model="snowflake-arctic-embed-l-v2.0",
+        )
+    )
+
+    with pytest.raises(DocumentNotFoundError):
+        api.read_document_chunk("CLM-001", "DOC-999", "missing")
+
+    with pytest.raises(ChunkNotFoundError):
+        api.read_document_chunk("CLM-001", "DOC-001", "missing")

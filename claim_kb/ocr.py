@@ -30,13 +30,12 @@ class AzureDocumentIntelligenceOcrClient:
             result = poller.result()
         pages: list[OcrPage] = []
         for page in result.pages:
-            lines = [line.content for line in page.lines]
+            text = "\n".join(line.content for line in page.lines).strip()
             pages.append(
                 OcrPage(
                     claim_id=claim_id,
                     page_number=int(page.page_number),
-                    text="\n".join(lines).strip(),
-                    lines=lines,
+                    text=text,
                     width=page.width,
                     height=page.height,
                     unit=page.unit,

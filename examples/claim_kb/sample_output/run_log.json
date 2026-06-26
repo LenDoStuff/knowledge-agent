@@ -1,0 +1,71 @@
+{
+  "claim_id": "CLM-SAMPLE-001",
+  "entries": [
+    {
+      "step": "preserve_original",
+      "status": "succeeded",
+      "message": "",
+      "started_at": "2026-06-26T12:00:00Z",
+      "finished_at": "2026-06-26T12:00:01Z",
+      "details": {}
+    },
+    {
+      "step": "ocr",
+      "status": "succeeded",
+      "message": "",
+      "started_at": "2026-06-26T12:00:01Z",
+      "finished_at": "2026-06-26T12:00:02Z",
+      "details": {}
+    },
+    {
+      "step": "split",
+      "status": "succeeded",
+      "message": "",
+      "started_at": "2026-06-26T12:00:02Z",
+      "finished_at": "2026-06-26T12:00:03Z",
+      "details": {}
+    },
+    {
+      "step": "metadata",
+      "status": "succeeded",
+      "message": "",
+      "started_at": "2026-06-26T12:00:03Z",
+      "finished_at": "2026-06-26T12:00:04Z",
+      "details": {}
+    },
+    {
+      "step": "chunk",
+      "status": "succeeded",
+      "message": "",
+      "started_at": "2026-06-26T12:00:04Z",
+      "finished_at": "2026-06-26T12:00:05Z",
+      "details": {}
+    },
+    {
+      "step": "embed",
+      "status": "succeeded",
+      "message": "",
+      "started_at": "2026-06-26T12:00:05Z",
+      "finished_at": "2026-06-26T12:00:06Z",
+      "details": {}
+    },
+    {
+      "step": "index",
+      "status": "succeeded",
+      "message": "",
+      "started_at": "2026-06-26T12:00:06Z",
+      "finished_at": "2026-06-26T12:00:07Z",
+      "details": {}
+    },
+    {
+      "step": "claim_metadata",
+      "status": "succeeded",
+      "message": "",
+      "started_at": "2026-06-26T12:00:07Z",
+      "finished_at": "2026-06-26T12:00:08Z",
+      "details": {}
+    }
+  ],
+  "created_at": "2026-06-26T12:00:00Z",
+  "finished_at": "2026-06-26T12:00:08Z"
+}

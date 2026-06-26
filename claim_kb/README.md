@@ -35,8 +35,9 @@ emails, loss adjuster reports, invoices, or other claim documents.
    document.
 4. Writes split PDF files for each logical document.
 5. Extracts metadata for each logical document:
-   `id`, `title`, `summary`, `involved_parties`, `document_type`, and
-   `page_range`.
+   `id`, `title`, `summary`, `involved_parties`, `events`,
+   `document_type`, and `page_range`.
+   Event dates use nullable numeric `year`, `month`, and `day` fields.
 6. Chunks OCR text by document and page range.
 7. Embeds each chunk with Snowflake Cortex `AI_EMBED`.
 8. Stores chunk vectors in a claim-local Chroma vector store.
@@ -52,8 +53,8 @@ By default, output is written under `data/claims/<claim_id>/`.
 
 ```text
 data/claims/CLM-001/
-  original/
-    original_claim_file.pdf
+  source/
+    claim.pdf
 
   documents/
     DOC-001_fnol.pdf
@@ -61,36 +62,35 @@ data/claims/CLM-001/
     DOC-003_loss_adjuster_report.pdf
     DOC-004_invoice.pdf
 
-  metadata/
-    claim_file.json
-    document_inventory.json
+  manifest.json
+  pages.jsonl
+  chunks.jsonl
+  run_log.json
 
-  ocr/
-    pages.jsonl
-
-  chunks/
-    chunks.jsonl
-
-  vector_store/
+  index/
     chroma/
-
-  logs/
-    ingestion_log.json
 ```
 
 Important output files:
 
-- `original/original_claim_file.pdf`: preserved source PDF
+- `source/claim.pdf`: preserved source PDF
 - `documents/*.pdf`: logical document PDFs split from the source
-- `metadata/document_inventory.json`: one metadata record per logical document
-- `ocr/pages.jsonl`: OCR text and page details
-- `chunks/chunks.jsonl`: chunk text, embeddings, document IDs, and page ranges
-- `vector_store/chroma/`: local vector index for retrieval
-- `logs/ingestion_log.json`: step-level ingestion status
+- `manifest.json`: claim manifest and one metadata record per logical document
+- `pages.jsonl`: OCR text and page details
+- `chunks.jsonl`: chunk text, embeddings, document IDs, and page ranges
+- `index/chroma/`: local vector index for retrieval
+- `run_log.json`: step-level ingestion status
 
-`metadata/claim_file.json` also records the embedding provider and model used
-for the claim. Search uses that stored model when embedding the query, so query
+`manifest.json` records the documents, embedding provider, and model used for
+the claim. Search uses that stored model when embedding the query, so query
 vectors match the vectors already saved in Chroma.
+
+## Examples
+
+Synthetic output examples live in
+[`../examples/claim_kb`](../examples/claim_kb/README.md). They are hand-written
+documentation samples that show persisted file shapes without including real
+claim data, generated PDFs, Chroma files, or service output.
 
 ## Programmatic API
 
@@ -176,7 +176,7 @@ Required for live ingestion:
 
 - `AZURE_AI_PROJECT_ENDPOINT`
 - `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT`
-- `AZURE_OPENAI_CHAT_DEPLOYMENT`
+- `AZURE_OPENAI_DEPLOYMENT`
 
 Optional:
 
@@ -195,7 +195,7 @@ Example PowerShell configuration:
 ```powershell
 $env:AZURE_AI_PROJECT_ENDPOINT="https://example.services.ai.azure.com/api/projects/my-project"
 $env:AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT="https://my-doc-intel.cognitiveservices.azure.com"
-$env:AZURE_OPENAI_CHAT_DEPLOYMENT="gpt-4.1"
+$env:AZURE_OPENAI_DEPLOYMENT="gpt-4.1"
 $env:SNOWFLAKE_CONNECTION_NAME="default"
 $env:SNOWFLAKE_EMBEDDING_MODEL="snowflake-arctic-embed-l-v2.0"
 ```

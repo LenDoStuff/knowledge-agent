@@ -27,7 +27,6 @@ class OcrPage(BaseModel):
     claim_id: str
     page_number: int = Field(ge=1)
     text: str = ""
-    lines: list[str] = Field(default_factory=list)
     width: float | None = None
     height: float | None = None
     unit: str | None = None
@@ -62,11 +61,44 @@ class LogicalDocument(BaseModel):
     file_name: str | None = None
 
 
+class DocumentParty(BaseModel):
+    name: str
+    role: str
+
+    @field_validator("name", "role", mode="before")
+    @classmethod
+    def require_non_empty_text(cls, value: Any) -> str:
+        if not isinstance(value, str):
+            raise ValueError("party fields must be strings")
+        text = value.strip()
+        if not text:
+            raise ValueError("party fields cannot be empty")
+        return text
+
+
+class DocumentEvent(BaseModel):
+    year: int | None = Field(default=None, ge=1)
+    month: int | None = Field(default=None, ge=1, le=12)
+    day: int | None = Field(default=None, ge=1, le=31)
+    sentence: str
+
+    @field_validator("sentence", mode="before")
+    @classmethod
+    def require_non_empty_sentence(cls, value: Any) -> str:
+        if not isinstance(value, str):
+            raise ValueError("event sentence must be a string")
+        text = value.strip()
+        if not text:
+            raise ValueError("event sentence cannot be empty")
+        return text
+
+
 class DocumentMetadata(BaseModel):
     id: str
     title: str
     summary: str
-    involved_parties: list[str] = Field(default_factory=list)
+    involved_parties: list[DocumentParty] = Field(default_factory=list)
+    events: list[DocumentEvent] = Field(default_factory=list)
     document_type: str
     page_range: PageRange
     file_name: str

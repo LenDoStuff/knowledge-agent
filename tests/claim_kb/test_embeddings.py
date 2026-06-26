@@ -45,7 +45,7 @@ def test_snowflake_ai_embedder_returns_ordered_embeddings(monkeypatch):
         data_root="data/claims",
         ai_project_endpoint="https://example.services.ai.azure.com/api/projects/proj",
         document_intelligence_endpoint="https://example.cognitiveservices.azure.com",
-        chat_deployment="gpt-test",
+        openai_deployment="gpt-test",
         tenant_id=None,
         snowflake_connection_name="default",
         snowflake_embedding_model="snowflake-arctic-embed-l-v2.0",

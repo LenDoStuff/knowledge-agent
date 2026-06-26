@@ -29,7 +29,6 @@ from claim_kb.storage import (
     ensure_claim_dirs,
     preserve_original_pdf,
     write_claim_metadata,
-    write_document_inventory,
     write_json,
     write_jsonl,
 )
@@ -59,7 +58,7 @@ def build_live_ingestion_services(
         embedder=SnowflakeAiEmbedder(settings),
         vector_store_factory=lambda root: ChromaVectorStore(
             claim_id,
-            root / "vector_store" / "chroma",
+            root / "index" / "chroma",
         ),
     )
 
@@ -87,7 +86,7 @@ def ingest_claim_pdf_with_services(
     with log_step(log, "ocr", root):
         pages = services.ocr_client.extract_pages(claim_id, original_pdf)
         write_jsonl(
-            root / "ocr" / "pages.jsonl",
+            root / "pages.jsonl",
             [page.model_dump(mode="json") for page in pages],
         )
 
@@ -108,7 +107,6 @@ def ingest_claim_pdf_with_services(
         for logical_document in logical_documents:
             metadata = services.classifier.extract_document_metadata(logical_document)
             documents.append(metadata)
-        write_document_inventory(root, documents)
 
     with log_step(log, "chunk", root):
         metadata_by_id = {document.id: document for document in documents}
@@ -120,7 +118,7 @@ def ingest_claim_pdf_with_services(
             for chunk, embedding in zip(chunks, embeddings, strict=True):
                 chunk.embedding = embedding
             write_jsonl(
-                root / "chunks" / "chunks.jsonl",
+                root / "chunks.jsonl",
                 [chunk.model_dump(mode="json") for chunk in chunks],
             )
         finally:
@@ -139,7 +137,7 @@ def ingest_claim_pdf_with_services(
         original_pdf_path=str(original_pdf),
         documents=documents,
         chunk_count=len(chunks),
-        vector_store_path=str(root / "vector_store" / "chroma"),
+        vector_store_path=str(root / "index" / "chroma"),
         embedding_provider=services.embedder.embedding_provider,
         embedding_model=services.embedder.embedding_model,
     )
@@ -147,7 +145,7 @@ def ingest_claim_pdf_with_services(
         write_claim_metadata(root, claim_file)
 
     log.finished_at = log.entries[-1].finished_at
-    write_json(root / "logs" / "ingestion_log.json", log.model_dump(mode="json"))
+    write_json(root / "run_log.json", log.model_dump(mode="json"))
     return claim_file
 
 
@@ -155,19 +153,19 @@ def ingest_claim_pdf_with_services(
 def log_step(log: IngestionLog, step: str, root: Path) -> Iterator[None]:
     entry = IngestionLogEntry(step=step, status="running")
     log.entries.append(entry)
-    write_json(root / "logs" / "ingestion_log.json", log.model_dump(mode="json"))
+    write_json(root / "run_log.json", log.model_dump(mode="json"))
     try:
         yield
     except Exception as exc:
         entry.status = "failed"
         entry.message = str(exc)
         entry.finished_at = utc_now()
-        write_json(root / "logs" / "ingestion_log.json", log.model_dump(mode="json"))
+        write_json(root / "run_log.json", log.model_dump(mode="json"))
         raise
     else:
         entry.status = "succeeded"
         entry.finished_at = utc_now()
-        write_json(root / "logs" / "ingestion_log.json", log.model_dump(mode="json"))
+        write_json(root / "run_log.json", log.model_dump(mode="json"))
 
 
 def main() -> None:

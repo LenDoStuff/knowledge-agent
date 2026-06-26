@@ -12,20 +12,15 @@ from claim_kb.exceptions import ClaimNotFoundError
 from claim_kb.schemas import (
     ChunkSearchResult,
     DocumentChunk,
-    DocumentMetadata,
     PageRange,
     StructuredClaimFile,
 )
 
 
 CLAIM_SUBDIRS = [
-    "original",
+    "source",
     "documents",
-    "metadata",
-    "ocr",
-    "chunks",
-    "vector_store/chroma",
-    "logs",
+    "index/chroma",
 ]
 
 
@@ -75,7 +70,7 @@ def require_claim_root(data_root: Path, claim_id: str) -> Path:
 def preserve_original_pdf(pdf_path: Path, root: Path) -> Path:
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF does not exist: {pdf_path}")
-    destination = root / "original" / "original_claim_file.pdf"
+    destination = root / "source" / "claim.pdf"
     shutil.copy2(pdf_path, destination)
     return destination
 
@@ -109,12 +104,12 @@ def read_jsonl(path: Path) -> list[dict]:
 
 
 def write_claim_metadata(root: Path, claim_file: StructuredClaimFile) -> None:
-    write_json(root / "metadata" / "claim_file.json", claim_file.model_dump(mode="json"))
+    write_json(root / "manifest.json", claim_file.model_dump(mode="json"))
 
 
 def read_claim_metadata(data_root: Path, claim_id: str) -> StructuredClaimFile:
     root = require_claim_root(data_root, claim_id)
-    path = root / "metadata" / "claim_file.json"
+    path = root / "manifest.json"
     if not path.exists():
         raise ClaimNotFoundError(f"Claim metadata not found for claim: {claim_id}")
     data = read_json(path)
@@ -123,29 +118,11 @@ def read_claim_metadata(data_root: Path, claim_id: str) -> StructuredClaimFile:
     return StructuredClaimFile.model_validate(data)
 
 
-def write_document_inventory(root: Path, documents: list[DocumentMetadata]) -> None:
-    write_json(
-        root / "metadata" / "document_inventory.json",
-        [document.model_dump(mode="json") for document in documents],
-    )
-
-
-def read_document_inventory(data_root: Path, claim_id: str) -> list[DocumentMetadata]:
-    root = require_claim_root(data_root, claim_id)
-    path = root / "metadata" / "document_inventory.json"
-    if not path.exists():
-        raise ClaimNotFoundError(f"Document inventory not found for claim: {claim_id}")
-    data = read_json(path)
-    if not isinstance(data, list):
-        raise ValueError(f"Invalid document inventory: {path}")
-    return [DocumentMetadata.model_validate(item) for item in data]
-
-
 def read_chunks(data_root: Path, claim_id: str) -> list[DocumentChunk]:
     root = require_claim_root(data_root, claim_id)
     return [
         DocumentChunk.model_validate(row)
-        for row in read_jsonl(root / "chunks" / "chunks.jsonl")
+        for row in read_jsonl(root / "chunks.jsonl")
     ]
 
 

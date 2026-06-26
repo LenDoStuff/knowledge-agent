@@ -27,7 +27,6 @@ from claim_kb.storage import (
     claim_root,
     read_claim_metadata,
     read_chunks,
-    read_document_inventory,
 )
 
 
@@ -87,7 +86,7 @@ class ClaimKbApi:
         )
 
     def list_claim_documents(self, claim_id: str) -> list[DocumentMetadata]:
-        return read_document_inventory(self.settings.data_root, claim_id)
+        return read_claim_metadata(self.settings.data_root, claim_id).documents
 
     def search_claim_file(
         self,
@@ -177,4 +176,4 @@ def _build_live_vector_store(
     claim_id: str,
 ) -> VectorStore:
     root = claim_root(settings.data_root, claim_id)
-    return ChromaVectorStore(claim_id, root / "vector_store" / "chroma")
+    return ChromaVectorStore(claim_id, root / "index" / "chroma")
