@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claim-kb"
+version = "0.1.0"
+description = "Backend pipeline for turning scanned claim PDFs into structured claim knowledge bases."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "azure-ai-documentintelligence>=1.0.0",
+    "azure-ai-projects>=2.2.0",
+    "azure-identity>=1.17.0",
+    "chromadb>=1.0.0",
+    "openai>=1.68.0",
+    "pydantic>=2.7",
+    "pypdf>=4.2",
+    "snowflake-snowpark-python>=1.35.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["claim_kb*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

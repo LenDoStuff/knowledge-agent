@@ -1,0 +1,215 @@
+# Claim KB Backend
+
+Backend module for turning one scanned insurance claim PDF into a structured,
+searchable claim knowledge base.
+
+It preserves the original PDF, OCRs the pages, splits the large PDF into
+logical documents, extracts document metadata, chunks the OCR text, embeds the
+chunks, stores vectors in Chroma, and exposes retrieval functions for other
+modules in this repo.
+
+No frontend or UI is included.
+
+## Input
+
+The ingestion pipeline requires:
+
+- `claim_id`: stable claim identifier, for example `CLM-001`
+- `pdf_path`: path to one scanned claim PDF, for example
+  `data/input/scanned_claim.pdf`
+
+Run ingestion with:
+
+```powershell
+python -m claim_kb.ingest --claim-id CLM-001 --pdf-path data/input/scanned_claim.pdf
+```
+
+The PDF may contain many logical documents in one scanned file, such as FNOL,
+emails, loss adjuster reports, invoices, or other claim documents.
+
+## What It Does
+
+1. Copies the original scanned PDF into the claim folder.
+2. Runs Azure Document Intelligence OCR with `prebuilt-layout`.
+3. Classifies each page using the current page, prior page, and current document
+   context to decide whether it starts a new document or continues the previous
+   document.
+4. Writes split PDF files for each logical document.
+5. Extracts metadata for each logical document:
+   `id`, `title`, `summary`, `involved_parties`, `document_type`, and
+   `page_range`.
+6. Chunks OCR text by document and page range.
+7. Embeds each chunk with Snowflake Cortex `AI_EMBED`.
+8. Stores chunk vectors in a claim-local Chroma vector store.
+9. Exposes listing, search, and chunk-read functions through `claim_kb.api`.
+
+## Output
+
+By default, output is written under `data/claims/<claim_id>/`.
+
+```text
+data/claims/CLM-001/
+  original/
+    original_claim_file.pdf
+
+  documents/
+    DOC-001_fnol.pdf
+    DOC-002_email.pdf
+    DOC-003_loss_adjuster_report.pdf
+    DOC-004_invoice.pdf
+
+  metadata/
+    claim_file.json
+    document_inventory.json
+
+  ocr/
+    pages.jsonl
+
+  chunks/
+    chunks.jsonl
+
+  vector_store/
+    chroma/
+
+  logs/
+    ingestion_log.json
+```
+
+Important output files:
+
+- `original/original_claim_file.pdf`: preserved source PDF
+- `documents/*.pdf`: logical document PDFs split from the source
+- `metadata/document_inventory.json`: one metadata record per logical document
+- `ocr/pages.jsonl`: OCR text and page details
+- `chunks/chunks.jsonl`: chunk text, embeddings, document IDs, and page ranges
+- `vector_store/chroma/`: local vector index for retrieval
+- `logs/ingestion_log.json`: step-level ingestion status
+
+`metadata/claim_file.json` also records the embedding provider and model used
+for the claim. Search uses that stored model when embedding the query, so query
+vectors match the vectors already saved in Chroma.
+
+## Programmatic API
+
+Other modules in this repo should use the stable API facade:
+
+```python
+from claim_kb.api import ClaimKbApi
+
+kb = ClaimKbApi()
+
+claim_file = kb.ingest_claim_pdf(
+    claim_id="CLM-001",
+    pdf_path="data/input/scanned_claim.pdf",
+)
+
+documents = kb.list_claim_documents("CLM-001")
+
+results = kb.search_claim_file(
+    claim_id="CLM-001",
+    query="repair invoice total",
+    document_types=["invoice"],
+    top_k=10,
+)
+
+chunk = kb.read_document_chunk(
+    claim_id="CLM-001",
+    document_id=results[0].document_id,
+    chunk_id=results[0].chunk_id,
+)
+```
+
+Convenience functions are also available:
+
+```python
+from claim_kb.api import (
+    ingest_claim_pdf,
+    list_claim_documents,
+    read_document_chunk,
+    search_claim_file,
+)
+```
+
+Core functions:
+
+```python
+ingest_claim_pdf(claim_id: str, pdf_path: str) -> StructuredClaimFile
+
+list_claim_documents(claim_id: str) -> list[DocumentMetadata]
+
+search_claim_file(
+    claim_id: str,
+    query: str,
+    document_types: list[str] | None = None,
+    top_k: int = 10,
+) -> list[ChunkSearchResult]
+
+read_document_chunk(
+    claim_id: str,
+    document_id: str,
+    chunk_id: str,
+) -> DocumentChunk
+```
+
+Search results include:
+
+- `document_id`
+- `chunk_id`
+- `page_range`
+- `text`
+- `score`
+- `document_type`
+
+## Configuration
+
+Azure OCR/classification authentication is keyless through Microsoft Entra ID
+browser sign-in. The code uses `InteractiveBrowserCredential` and does not
+require Azure API keys.
+
+Embeddings are generated through Snowflake Cortex `AI_EMBED`. The code creates a
+Snowpark session from your local Snowflake TOML connection config.
+
+Required for live ingestion:
+
+- `AZURE_AI_PROJECT_ENDPOINT`
+- `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT`
+- `AZURE_OPENAI_CHAT_DEPLOYMENT`
+
+Optional:
+
+- `AZURE_TENANT_ID`: tenant to use for browser sign-in
+- `SNOWFLAKE_CONNECTION_NAME`: local Snowflake connection name, defaults to
+  `default`
+- `SNOWFLAKE_EMBEDDING_MODEL`: Snowflake `AI_EMBED` model, defaults to
+  `snowflake-arctic-embed-l-v2.0`
+- `CLAIM_KB_DATA_ROOT`: output root, defaults to `data/claims`
+
+The Document Intelligence endpoint must be a custom subdomain endpoint for
+Microsoft Entra authentication, not a regional endpoint.
+
+Example PowerShell configuration:
+
+```powershell
+$env:AZURE_AI_PROJECT_ENDPOINT="https://example.services.ai.azure.com/api/projects/my-project"
+$env:AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT="https://my-doc-intel.cognitiveservices.azure.com"
+$env:AZURE_OPENAI_CHAT_DEPLOYMENT="gpt-4.1"
+$env:SNOWFLAKE_CONNECTION_NAME="default"
+$env:SNOWFLAKE_EMBEDDING_MODEL="snowflake-arctic-embed-l-v2.0"
+```
+
+## Development
+
+Install locally:
+
+```powershell
+python -m pip install -e ".[dev]"
+```
+
+Run tests:
+
+```powershell
+python -m pytest
+```
+
+The tests use mocked Azure and Snowflake clients plus a generated sample PDF, so
+they do not open browser auth or call live Azure/Snowflake services.
