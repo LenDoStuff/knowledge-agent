@@ -101,6 +101,9 @@ class FakeEmbedder:
     def embed_texts(self, texts):
         return [[float(index + 1), float(len(text))] for index, text in enumerate(texts)]
 
+    def close(self):
+        pass
+
 
 class FakeVectorStore:
     def __init__(self) -> None:
@@ -120,6 +123,9 @@ class FakeVectorStore:
                 document_type="fnol",
             )
         ]
+
+    def close(self):
+        pass
 
 
 def test_ingestion_pipeline_creates_expected_outputs(tmp_path, sample_pdf):

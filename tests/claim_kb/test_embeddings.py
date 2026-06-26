@@ -35,8 +35,12 @@ class FakeDataFrame:
         ]
 
 
-def test_snowflake_ai_embedder_returns_ordered_embeddings():
+def test_snowflake_ai_embedder_returns_ordered_embeddings(monkeypatch):
     session = FakeSession()
+    monkeypatch.setattr(
+        "claim_kb.embeddings.create_snowflake_session",
+        lambda settings: session,
+    )
     settings = ClaimKbSettings(
         data_root="data/claims",
         ai_project_endpoint="https://example.services.ai.azure.com/api/projects/proj",
@@ -46,7 +50,7 @@ def test_snowflake_ai_embedder_returns_ordered_embeddings():
         snowflake_connection_name="default",
         snowflake_embedding_model="snowflake-arctic-embed-l-v2.0",
     )
-    embedder = SnowflakeAiEmbedder(settings, session=session)
+    embedder = SnowflakeAiEmbedder(settings)
 
     embeddings = embedder.embed_texts(["alpha", "beta"])
     embedder.close()
@@ -54,4 +58,4 @@ def test_snowflake_ai_embedder_returns_ordered_embeddings():
     assert embeddings == [[0.0, 5.0], [1.0, 4.0]]
     assert embedder.embedding_provider == "snowflake"
     assert embedder.embedding_model == "snowflake-arctic-embed-l-v2.0"
-    assert not session.closed
+    assert session.closed

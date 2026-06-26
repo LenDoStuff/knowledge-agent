@@ -29,19 +29,18 @@ class AzureDocumentIntelligenceOcrClient:
             poller = self._client.begin_analyze_document("prebuilt-layout", body=handle)
             result = poller.result()
         pages: list[OcrPage] = []
-        for page in getattr(result, "pages", []) or []:
-            lines = [line.content for line in getattr(page, "lines", []) or []]
-            words = getattr(page, "words", []) or []
+        for page in result.pages:
+            lines = [line.content for line in page.lines]
             pages.append(
                 OcrPage(
                     claim_id=claim_id,
                     page_number=int(page.page_number),
                     text="\n".join(lines).strip(),
                     lines=lines,
-                    width=getattr(page, "width", None),
-                    height=getattr(page, "height", None),
-                    unit=getattr(page, "unit", None),
-                    word_count=len(words),
+                    width=page.width,
+                    height=page.height,
+                    unit=page.unit,
+                    word_count=len(page.words),
                 )
             )
         return sorted(pages, key=lambda item: item.page_number)

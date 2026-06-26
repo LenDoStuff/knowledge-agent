@@ -37,16 +37,20 @@ class OcrPage(BaseModel):
 class PageBoundaryDecision(BaseModel):
     page_number: int = Field(ge=1)
     is_new_document: bool
-    document_type: str = "unknown"
-    title: str = "Untitled document"
-    reason: str = ""
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    document_type: str
+    title: str
+    reason: str
+    confidence: float = Field(ge=0.0, le=1.0)
 
-    @field_validator("document_type", "title", mode="before")
+    @field_validator("document_type", "title", "reason", mode="before")
     @classmethod
-    def normalize_non_empty_text(cls, value: Any) -> str:
-        text = str(value or "").strip()
-        return text or "unknown"
+    def require_non_empty_text(cls, value: Any) -> str:
+        if not isinstance(value, str):
+            raise ValueError("text fields must be strings")
+        text = value.strip()
+        if not text:
+            raise ValueError("text fields cannot be empty")
+        return text
 
 
 class LogicalDocument(BaseModel):
@@ -95,8 +99,8 @@ class StructuredClaimFile(BaseModel):
     documents: list[DocumentMetadata]
     chunk_count: int
     vector_store_path: str
-    embedding_provider: str = "snowflake"
-    embedding_model: str = "snowflake-arctic-embed-l-v2.0"
+    embedding_provider: str
+    embedding_model: str
     created_at: datetime = Field(default_factory=utc_now)
 
 

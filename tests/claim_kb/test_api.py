@@ -23,6 +23,9 @@ class FakeEmbedder:
         assert texts == ["invoice total"]
         return [[0.4, 0.5]]
 
+    def close(self):
+        pass
+
 
 class ClosingVectorStore:
     def __init__(self) -> None:
@@ -105,13 +108,15 @@ def test_claim_kb_api_supports_internal_module_usage(tmp_path):
     )
     vector_store = ClosingVectorStore()
     model_log = []
+
+    def build_embedder(settings):
+        model_log.append(settings.snowflake_embedding_model)
+        return FakeEmbedder(model_log)
+
     api = ClaimKbApi(
         settings=settings,
         credential=object(),
-        embedder_factory=lambda settings, credential: (
-            model_log.append(settings.snowflake_embedding_model)
-            or FakeEmbedder(model_log)
-        ),
+        embedder_factory=build_embedder,
         vector_store_factory=lambda settings, claim_id: vector_store,
     )
 

@@ -32,7 +32,7 @@ from claim_kb.storage import (
 
 
 CredentialFactory = Callable[[ClaimKbSettings], object]
-EmbedderFactory = Callable[[ClaimKbSettings, object | None], TextEmbedder]
+EmbedderFactory = Callable[[ClaimKbSettings], TextEmbedder]
 VectorStoreFactory = Callable[[ClaimKbSettings, str], VectorStore]
 IngestionServicesFactory = Callable[
     [str, ClaimKbSettings, object],
@@ -54,12 +54,18 @@ class ClaimKbApi:
         embedder_factory: EmbedderFactory | None = None,
         vector_store_factory: VectorStoreFactory | None = None,
     ) -> None:
-        self.settings = settings or ClaimKbSettings.from_env()
+        self.settings = settings if settings is not None else ClaimKbSettings.from_env()
         self._credential = credential
         self._credential_factory = credential_factory
         self._ingestion_services_factory = ingestion_services_factory
-        self._embedder_factory = embedder_factory or _build_live_embedder
-        self._vector_store_factory = vector_store_factory or _build_live_vector_store
+        self._embedder_factory = (
+            embedder_factory if embedder_factory is not None else _build_live_embedder
+        )
+        self._vector_store_factory = (
+            vector_store_factory
+            if vector_store_factory is not None
+            else _build_live_vector_store
+        )
 
     def ingest_claim_pdf(
         self,
@@ -94,22 +100,18 @@ class ClaimKbApi:
         claim_file = read_claim_metadata(self.settings.data_root, claim_id)
         search_settings = replace(
             self.settings,
-            snowflake_embedding_model=(
-                claim_file.embedding_model or self.settings.snowflake_embedding_model
-            ),
+            snowflake_embedding_model=claim_file.embedding_model,
         )
-        embedder = self._embedder_factory(search_settings, self._credential)
-        vector_store = self._vector_store_factory(search_settings, claim_id)
-        query_embedding = embedder.embed_texts([query])[0]
+        embedder = self._embedder_factory(search_settings)
         try:
-            return vector_store.search(query_embedding, document_types, top_k)
+            vector_store = self._vector_store_factory(search_settings, claim_id)
+            try:
+                query_embedding = embedder.embed_texts([query])[0]
+                return vector_store.search(query_embedding, document_types, top_k)
+            finally:
+                vector_store.close()
         finally:
-            embedder_close = getattr(embedder, "close", None)
-            if embedder_close is not None:
-                embedder_close()
-            close = getattr(vector_store, "close", None)
-            if close is not None:
-                close()
+            embedder.close()
 
     def read_document_chunk(
         self,
@@ -166,7 +168,6 @@ def read_document_chunk(
 
 def _build_live_embedder(
     settings: ClaimKbSettings,
-    credential: object | None,
 ) -> TextEmbedder:
     return SnowflakeAiEmbedder(settings)
 

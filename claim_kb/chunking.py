@@ -14,7 +14,9 @@ def chunk_documents(
     chunks: list[DocumentChunk] = []
     for document in documents:
         metadata = metadata_by_id[document.id]
-        chunks.extend(_chunk_document(claim_id, document, metadata, len(chunks), max_chars))
+        chunks.extend(
+            _chunk_document(claim_id, document, metadata, len(chunks), max_chars)
+        )
     return chunks
 
 
@@ -66,16 +68,4 @@ def _chunk_document(
         current_parts.append(f"Page {page.page_number}\n{page_text}")
     flush()
 
-    if not chunks:
-        chunks.append(
-            DocumentChunk(
-                claim_id=claim_id,
-                document_id=document.id,
-                chunk_id=f"{document.id}-CHUNK-001",
-                chunk_index=global_start_index,
-                document_type=metadata.document_type,
-                page_range=document.page_range,
-                text="",
-            )
-        )
     return chunks

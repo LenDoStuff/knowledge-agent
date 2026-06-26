@@ -19,7 +19,3 @@ class DocumentNotFoundError(ClaimKbError):
 
 class ChunkNotFoundError(ClaimKbError):
     """Raised when a chunk cannot be found within a claim document."""
-
-
-class IngestionError(ClaimKbError):
-    """Raised when ingestion cannot complete."""

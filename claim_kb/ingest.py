@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
@@ -62,18 +64,12 @@ def build_live_ingestion_services(
     )
 
 
+@dataclass
 class IngestionServices:
-    def __init__(
-        self,
-        ocr_client: OcrClient,
-        classifier: ClaimClassifier,
-        embedder: TextEmbedder,
-        vector_store_factory,
-    ) -> None:
-        self.ocr_client = ocr_client
-        self.classifier = classifier
-        self.embedder = embedder
-        self.vector_store_factory = vector_store_factory
+    ocr_client: OcrClient
+    classifier: ClaimClassifier
+    embedder: TextEmbedder
+    vector_store_factory: Callable[[Path], VectorStore]
 
 
 def ingest_claim_pdf_with_services(
@@ -128,18 +124,14 @@ def ingest_claim_pdf_with_services(
                 [chunk.model_dump(mode="json") for chunk in chunks],
             )
         finally:
-            close = getattr(services.embedder, "close", None)
-            if close is not None:
-                close()
+            services.embedder.close()
 
     with log_step(log, "index", root):
         vector_store: VectorStore = services.vector_store_factory(root)
         try:
             vector_store.index_chunks(chunks)
         finally:
-            close = getattr(vector_store, "close", None)
-            if close is not None:
-                close()
+            vector_store.close()
 
     claim_file = StructuredClaimFile(
         claim_id=claim_id,
@@ -148,17 +140,13 @@ def ingest_claim_pdf_with_services(
         documents=documents,
         chunk_count=len(chunks),
         vector_store_path=str(root / "vector_store" / "chroma"),
-        embedding_provider=getattr(services.embedder, "embedding_provider", "snowflake"),
-        embedding_model=getattr(
-            services.embedder,
-            "embedding_model",
-            settings.snowflake_embedding_model,
-        ),
+        embedding_provider=services.embedder.embedding_provider,
+        embedding_model=services.embedder.embedding_model,
     )
     with log_step(log, "claim_metadata", root):
         write_claim_metadata(root, claim_file)
 
-    log.finished_at = log.entries[-1].finished_at if log.entries else None
+    log.finished_at = log.entries[-1].finished_at
     write_json(root / "logs" / "ingestion_log.json", log.model_dump(mode="json"))
     return claim_file
 

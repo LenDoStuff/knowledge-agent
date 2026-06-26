@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol, Sequence
+from typing import Protocol, Sequence
 
 from claim_kb.config import ClaimKbSettings
 
@@ -14,18 +14,16 @@ class TextEmbedder(Protocol):
     def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
         ...
 
+    def close(self) -> None:
+        ...
+
 
 class SnowflakeAiEmbedder:
     embedding_provider = "snowflake"
 
-    def __init__(
-        self,
-        settings: ClaimKbSettings,
-        session: Any | None = None,
-    ) -> None:
+    def __init__(self, settings: ClaimKbSettings) -> None:
         self.embedding_model = settings.snowflake_embedding_model
-        self._session = session or create_snowflake_session(settings)
-        self._owns_session = session is None
+        self._session = create_snowflake_session(settings)
 
     def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
         if not texts:
@@ -33,7 +31,7 @@ class SnowflakeAiEmbedder:
 
         from snowflake.snowpark.functions import ai_embed, col
 
-        rows = [(index, text or "") for index, text in enumerate(texts)]
+        rows = [(index, text) for index, text in enumerate(texts)]
         dataframe = self._session.create_dataframe(rows, schema=["chunk_index", "text"])
         result_rows = (
             dataframe.select(
@@ -46,16 +44,12 @@ class SnowflakeAiEmbedder:
 
         embeddings_by_index: dict[int, list[float]] = {}
         for row in result_rows:
-            index = int(_row_get(row, "chunk_index", 0))
-            embeddings_by_index[index] = _coerce_embedding(_row_get(row, "embedding", 1))
+            index = int(row["CHUNK_INDEX"])
+            embeddings_by_index[index] = _coerce_embedding(row["EMBEDDING"])
         return [embeddings_by_index[index] for index in range(len(texts))]
 
     def close(self) -> None:
-        if self._session is not None and self._owns_session:
-            close = getattr(self._session, "close", None)
-            if close is not None:
-                close()
-            self._session = None
+        self._session.close()
 
 
 def create_snowflake_session(settings: ClaimKbSettings):
@@ -69,17 +63,5 @@ def create_snowflake_session(settings: ClaimKbSettings):
     )
 
 
-def _row_get(row: Any, name: str, position: int) -> Any:
-    candidates = (name, name.upper(), name.lower())
-    for candidate in candidates:
-        try:
-            return row[candidate]
-        except (KeyError, TypeError, AttributeError):
-            pass
-    return row[position]
-
-
-def _coerce_embedding(value: Any) -> list[float]:
-    if hasattr(value, "tolist"):
-        value = value.tolist()
+def _coerce_embedding(value: Sequence[float]) -> list[float]:
     return [float(item) for item in value]

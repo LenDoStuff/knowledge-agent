@@ -41,6 +41,9 @@ class VectorStore(Protocol):
     ) -> list[ChunkSearchResult]:
         ...
 
+    def close(self) -> None:
+        ...
+
 
 def safe_claim_id(claim_id: str) -> str:
     claim_id = claim_id.strip()
@@ -79,7 +82,7 @@ def preserve_original_pdf(pdf_path: Path, root: Path) -> Path:
 
 def write_json(path: Path, data: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 def read_json(path: Path) -> object:
@@ -90,12 +93,12 @@ def write_jsonl(path: Path, items: Iterable[object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         for item in items:
-            handle.write(json.dumps(item, default=str) + "\n")
+            handle.write(json.dumps(item) + "\n")
 
 
 def read_jsonl(path: Path) -> list[dict]:
     if not path.exists():
-        return []
+        raise FileNotFoundError(f"JSONL file does not exist: {path}")
     rows = []
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
@@ -146,16 +149,16 @@ def read_chunks(data_root: Path, claim_id: str) -> list[DocumentChunk]:
     ]
 
 
-def slugify(value: str, fallback: str = "document") -> str:
+def slugify(value: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "_", value.strip().lower()).strip("_")
-    return slug or fallback
+    if not slug:
+        raise ValueError("Cannot create slug from empty value")
+    return slug
 
 
 def chroma_collection_name(claim_id: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9_-]+", "_", safe_claim_id(claim_id))
     name = f"claim_{safe}"
-    if len(name) < 3:
-        name = f"{name}_kb"
     return name[:512]
 
 
@@ -190,12 +193,11 @@ class ChromaVectorStore:
 
     def reset_collection(self) -> None:
         client = self._client_instance()
+        name = chroma_collection_name(self.claim_id)
         self._collection_cache = None
-        try:
-            client.delete_collection(chroma_collection_name(self.claim_id))
-        except Exception as exc:
-            if "does not exist" not in str(exc).lower():
-                raise
+        existing_names = {collection.name for collection in client.list_collections()}
+        if name in existing_names:
+            client.delete_collection(name)
 
     def index_chunks(self, chunks: list[DocumentChunk]) -> None:
         self.reset_collection()
@@ -225,15 +227,15 @@ class ChromaVectorStore:
             where=where,
             include=["documents", "metadatas", "distances"],
         )
-        ids = response.get("ids", [[]])[0]
-        documents = response.get("documents", [[]])[0]
-        metadatas = response.get("metadatas", [[]])[0]
-        distances = response.get("distances", [[]])[0]
+        ids = response["ids"][0]
+        documents = response["documents"][0]
+        metadatas = response["metadatas"][0]
+        distances = response["distances"][0]
         results: list[ChunkSearchResult] = []
         for index, chunk_id in enumerate(ids):
-            metadata = metadatas[index] or {}
-            distance = distances[index] if index < len(distances) else None
-            score = 1.0 / (1.0 + float(distance)) if distance is not None else 0.0
+            metadata = metadatas[index]
+            distance = distances[index]
+            score = 1.0 / (1.0 + float(distance))
             results.append(
                 ChunkSearchResult(
                     document_id=str(metadata["document_id"]),
@@ -244,18 +246,14 @@ class ChromaVectorStore:
                     ),
                     text=documents[index],
                     score=score,
-                    document_type=metadata.get("document_type"),
+                    document_type=str(metadata["document_type"]),
                 )
             )
         return results
 
     def close(self) -> None:
-        if self._client is not None:
-            close = getattr(self._client, "close", None)
-            if close is not None:
-                close()
-            self._client = None
-            self._collection_cache = None
+        self._client = None
+        self._collection_cache = None
 
 
 def _chunk_metadata(chunk: DocumentChunk) -> dict[str, str | int]:

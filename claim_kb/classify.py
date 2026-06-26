@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any, Protocol
 
 from claim_kb.config import ClaimKbSettings
@@ -110,20 +109,16 @@ class AzureClaimClassifier:
                 f"OCR text:\n{_clip(text, 10000)}"
             ),
         )
+        if document.file_name is None:
+            raise ValueError(f"Document {document.id} has no split PDF file name")
         return DocumentMetadata(
             id=document.id,
-            title=str(response.get("title") or document.title),
-            summary=str(response.get("summary") or ""),
-            involved_parties=[
-                str(party)
-                for party in response.get("involved_parties", [])
-                if str(party).strip()
-            ],
-            document_type=str(
-                response.get("document_type") or document.document_type or "unknown"
-            ),
+            title=_required_text(response, "title"),
+            summary=_required_text(response, "summary", allow_empty=True),
+            involved_parties=_required_text_list(response, "involved_parties"),
+            document_type=_required_text(response, "document_type"),
             page_range=document.page_range,
-            file_name=document.file_name or f"{document.id}.pdf",
+            file_name=document.file_name,
         )
 
     def _json_chat(self, system: str, user: str) -> dict[str, Any]:
@@ -140,26 +135,44 @@ class AzureClaimClassifier:
         return _parse_json_object(content)
 
 
-def fallback_document_metadata(document: LogicalDocument) -> DocumentMetadata:
-    return DocumentMetadata(
-        id=document.id,
-        title=document.title,
-        summary="",
-        involved_parties=[],
-        document_type=document.document_type,
-        page_range=document.page_range,
-        file_name=document.file_name or f"{document.id}.pdf",
-    )
-
-
 def _parse_json_object(content: str | None) -> dict[str, Any]:
     if not content:
-        return {}
+        raise ValueError("Expected JSON object content from chat completion")
     content = content.strip()
-    fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", content, re.DOTALL)
-    if fenced:
-        content = fenced.group(1)
-    return json.loads(content)
+    parsed = json.loads(content)
+    if not isinstance(parsed, dict):
+        raise ValueError("Expected chat completion to return a JSON object")
+    return parsed
+
+
+def _required_text(
+    data: dict[str, Any],
+    key: str,
+    allow_empty: bool = False,
+) -> str:
+    if key not in data:
+        raise ValueError(f"Missing required metadata field: {key}")
+    value = data[key]
+    if not isinstance(value, str):
+        raise ValueError(f"Metadata field {key} must be a string")
+    value = value.strip()
+    if not allow_empty and not value:
+        raise ValueError(f"Metadata field {key} cannot be empty")
+    return value
+
+
+def _required_text_list(data: dict[str, Any], key: str) -> list[str]:
+    if key not in data:
+        raise ValueError(f"Missing required metadata field: {key}")
+    value = data[key]
+    if not isinstance(value, list):
+        raise ValueError(f"Metadata field {key} must be a list")
+    if not all(isinstance(item, str) for item in value):
+        raise ValueError(f"Metadata field {key} must contain only strings")
+    stripped = [item.strip() for item in value]
+    if any(not item for item in stripped):
+        raise ValueError(f"Metadata field {key} cannot contain empty strings")
+    return stripped
 
 
 def _clip(value: str, limit: int) -> str:
