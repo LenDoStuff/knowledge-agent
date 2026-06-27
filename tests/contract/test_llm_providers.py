@@ -5,18 +5,18 @@ import pytest
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
-from knowledge_agent.infrastructure import (
+from infrastructure import (
     LlmSettings,
     PortableResponsesClient,
     create_openai_runtime,
 )
-from research_agent.agent import run_claim_research
-from research_agent.llm import ResearchResponsesLlm
+from research.agent import run_claim_research
+from research.llm import ResearchResponsesLlm
 
 
 load_dotenv()
 SAMPLE_OUTPUT = (
-    Path(__file__).parents[2] / "examples" / "claim_kb" / "sample_output"
+    Path(__file__).parents[2] / "examples" / "ingest" / "sample_output"
 )
 GOLDEN_DATASET = Path(__file__).parents[2] / "evals" / "azure_research.json"
 

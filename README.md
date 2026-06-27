@@ -12,8 +12,8 @@ working code mantra.
 
 | Module | Status | Purpose |
 | --- | --- | --- |
-| [`claim_kb`](claim_kb/README.md) | Current | Ingests a combined claim PDF or a folder of separate PDFs into a structured, searchable claim knowledge base. |
-| `research_agent` | Current | Runs cited, fixed-depth research over one persisted claim knowledge base. |
+| [`ingest`](ingest/README.md) | Current | Ingests a combined claim PDF or a folder of separate PDFs into a structured, searchable claim knowledge base. |
+| `research` | Current | Runs cited, fixed-depth research over one persisted claim knowledge base. |
 
 ## Folder Structure
 
@@ -22,23 +22,22 @@ working code mantra.
   AGENTS.md
   README.md
   pyproject.toml
-  knowledge_agent/
-    infrastructure/
-      config.py
-      errors.py
-      responses.py
-      runtime.py
-  claim_kb/
+  infrastructure/
+    config.py
+    errors.py
+    responses.py
+    runtime.py
+  ingest/
     README.md
     *.py
-  research_agent/
+  research/
     agent.py
     bootstrap.py
     cli.py
     llm.py
     schemas.py
   examples/
-    claim_kb/
+    ingest/
       README.md
       sample_input/
       sample_output/
@@ -47,12 +46,12 @@ working code mantra.
   tests/
     contract/
       test_llm_providers.py
-    knowledge_agent/
+    infrastructure/
       test_*.py
-    claim_kb/
+    ingest/
       test_*.py
       conftest.py
-    research_agent/
+    research/
       test_*.py
 ```
 
@@ -61,7 +60,7 @@ Generated and local-only folders such as `.venv/`, `.pytest_cache/`,
 
 Provider configuration, OpenAI-compatible client construction, portable
 Responses API calls, resource cleanup, logging, and normalized errors live under
-`knowledge_agent/infrastructure/`. Claim and research modules keep their prompts,
+`infrastructure/`. Claim and research modules keep their prompts,
 schemas, orchestration, and validation rules.
 
 Both modes use the official `openai` Python SDK and the same
@@ -71,33 +70,33 @@ business logic.
 
 ## Claim KB
 
-[`claim_kb`](claim_kb/README.md) accepts either one combined claim PDF or a
+[`ingest`](ingest/README.md) accepts either one combined claim PDF or a
 folder of already separate PDFs. It runs OCR, prepares ordered documents,
 extracts metadata, and chunks text. `home` mode uses keyword retrieval without
 embeddings. `work` mode embeds chunks with Snowflake Cortex and stores vectors
 in Chroma.
 
 Synthetic example output is available in
-[`examples/claim_kb`](examples/claim_kb/README.md). These files are hand-written
+[`examples/ingest`](examples/ingest/README.md). These files are hand-written
 documentation examples and read-only test input, not runtime output.
 
 Run ingestion with:
 
 ```powershell
-python -m claim_kb.cli --claim-id CLM-001 --pdf-path data/input/scanned_claim.pdf
+python -m ingest.cli --claim-id CLM-001 --pdf-path data/input/scanned_claim.pdf
 ```
 
 For separate document PDFs:
 
 ```powershell
-python -m claim_kb.cli `
+python -m ingest.cli `
   --claim-id PROP-B2B-2026-0417 `
-  --folder-path examples/claim_kb/sample_input
+  --folder-path examples/ingest/sample_input
 ```
 
 ## Research Agent
 
-`research_agent` answers one question against one persisted Claim KB folder. It
+`research` answers one question against one persisted Claim KB folder. It
 plans local searches, extracts cited findings, follows up for a fixed depth, and
 writes an answer using only those findings. It does not use web search.
 Retrieval is local keyword search, so it works with both Snowflake-embedded and
@@ -130,23 +129,23 @@ Snowflake. Copy `.env.example` to `.env`; the `.env` file is ignored by Git.
 Run research with:
 
 ```powershell
-python -m research_agent.cli `
-  --claim-path examples/claim_kb/sample_output `
+python -m research.cli `
+  --claim-path examples/ingest/sample_output `
   --question "What repairs were invoiced?"
 ```
 
 The answer is followed by a `Sources:` section containing the exact
 `source_ref` values from retrieved claim chunks.
 
-Research logs append to the ignored file `logs/research_agent.log`. The default
+Research logs append to the ignored file `logs/research.log`. The default
 `INFO` level records research layers, queries, evidence counts/source refs,
 finding counts, provider status, token usage, and latency without OCR evidence
 text. Use `--log-level DEBUG` to additionally record exact LLM prompts and
 complete parsed outputs:
 
 ```powershell
-python -m research_agent.cli `
-  --claim-path examples/claim_kb/sample_output `
+python -m research.cli `
+  --claim-path examples/ingest/sample_output `
   --question "What repairs were invoiced?" `
   --log-level DEBUG
 ```
@@ -175,7 +174,7 @@ Work-mode ingestion opens a browser for Microsoft Entra authentication:
 
 ```powershell
 $env:KNOWLEDGE_AGENT_MODE="work"
-python -m claim_kb.cli `
+python -m ingest.cli `
   --claim-id CLM-WORK-SMOKE `
-  --folder-path examples/claim_kb/sample_input
+  --folder-path examples/ingest/sample_input
 ```
