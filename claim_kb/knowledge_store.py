@@ -8,13 +8,14 @@ from pathlib import Path
 
 from claim_kb.exceptions import DocumentNotFoundError, PageNotFoundError
 from claim_kb.schemas import (
+    ChunkSearchResult,
     DocumentChunk,
     DocumentMetadata,
     KnowledgeItem,
     PageText,
     StructuredClaimFile,
 )
-from claim_kb.storage import read_json, read_jsonl
+from claim_kb.filesystem import read_json, read_jsonl
 
 
 class ClaimKbKnowledgeStore:
@@ -36,6 +37,7 @@ class ClaimKbKnowledgeStore:
 
         self._documents = {document.id: document for document in self.manifest.documents}
         self._pages = {page.page_id: page for page in pages}
+        self._chunks = {chunk.chunk_id: chunk for chunk in chunks}
         if len(self._documents) != len(self.manifest.documents):
             raise ValueError("manifest.json contains duplicate document IDs")
         if len(self._pages) != len(pages):
@@ -96,14 +98,43 @@ class ClaimKbKnowledgeStore:
                     )
 
     def search(self, query: str, top_k: int = 8) -> list[KnowledgeItem]:
+        return [item for _, _, item in self._rank(query, None, top_k)]
+
+    def search_chunks(
+        self,
+        query: str,
+        document_types: list[str] | None = None,
+        top_k: int = 8,
+    ) -> list[ChunkSearchResult]:
+        return [
+            ChunkSearchResult(
+                document_id=item.document_id,
+                chunk_id=item.item_id,
+                page_range=self._chunks[item.item_id].page_range,
+                text=item.text,
+                score=float(score),
+                document_type=item.document_type,
+            )
+            for score, _, item in self._rank(query, document_types, top_k)
+        ]
+
+    def _rank(
+        self,
+        query: str,
+        document_types: list[str] | None,
+        top_k: int,
+    ) -> list[tuple[int, int, KnowledgeItem]]:
         terms = _terms(query)
         if not terms:
             raise ValueError("query must contain searchable text")
         if top_k < 1:
             raise ValueError("top_k must be at least 1")
 
+        allowed_types = set(document_types) if document_types else None
         ranked: list[tuple[int, int, KnowledgeItem]] = []
         for index, item in enumerate(self._items):
+            if allowed_types is not None and item.document_type not in allowed_types:
+                continue
             searchable = " ".join(
                 [
                     item.text,
@@ -118,7 +149,7 @@ class ClaimKbKnowledgeStore:
                 ranked.append((score, index, item))
 
         ranked.sort(key=lambda result: (-result[0], result[1]))
-        return [item for _, _, item in ranked[:top_k]]
+        return ranked[:top_k]
 
     def get_document(self, document_id: str) -> DocumentMetadata:
         document = self._documents.get(document_id)

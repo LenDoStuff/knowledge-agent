@@ -8,7 +8,7 @@ from pypdf import PdfReader, PdfWriter
 
 from claim_kb.classify import ClaimClassifier
 from claim_kb.schemas import LogicalDocument, PageRange, PageText
-from claim_kb.storage import slugify
+from claim_kb.filesystem import slugify
 
 
 def group_logical_documents(
@@ -59,12 +59,12 @@ def group_logical_documents(
 
 
 def write_split_pdfs(
-    original_pdf_path: Path,
+    source_pdf_path: Path,
     documents: list[LogicalDocument],
     output_dir: Path,
 ) -> list[LogicalDocument]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    reader = PdfReader(str(original_pdf_path))
+    reader = PdfReader(str(source_pdf_path))
     page_count = len(reader.pages)
     for document in documents:
         writer = PdfWriter()

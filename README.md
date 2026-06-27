@@ -12,8 +12,8 @@ working code mantra.
 
 | Module | Status | Purpose |
 | --- | --- | --- |
-| [`claim_kb`](claim_kb/README.md) | Current | Ingests scanned insurance claim PDFs into a structured, searchable claim knowledge base. |
-| `research_agent` | Planned | Future module for claim research workflows. Not implemented yet. |
+| [`claim_kb`](claim_kb/README.md) | Current | Ingests a combined claim PDF or a folder of separate PDFs into a structured, searchable claim knowledge base. |
+| `research_agent` | Current | Runs cited, fixed-depth research over one persisted claim knowledge base. |
 
 ## Folder Structure
 
@@ -22,38 +22,137 @@ working code mantra.
   AGENTS.md
   README.md
   pyproject.toml
+  knowledge_agent/
+    infrastructure/
+      config.py
+      errors.py
+      responses.py
+      runtime.py
   claim_kb/
     README.md
     *.py
+  research_agent/
+    agent.py
+    bootstrap.py
+    cli.py
+    llm.py
+    schemas.py
   examples/
     claim_kb/
       README.md
+      sample_input/
       sample_output/
+  evals/
+    azure_research.json
   tests/
+    contract/
+      test_llm_providers.py
+    knowledge_agent/
+      test_*.py
     claim_kb/
       test_*.py
       conftest.py
+    research_agent/
+      test_*.py
 ```
 
 Generated and local-only folders such as `.venv/`, `.pytest_cache/`,
-`claim_kb.egg-info/`, `__pycache__/`, and `data/claims/` are ignored.
+`*.egg-info/`, `__pycache__/`, and `data/claims/` are ignored.
 
-## Current Module
+Provider configuration, OpenAI-compatible client construction, portable
+Responses API calls, resource cleanup, logging, and normalized errors live under
+`knowledge_agent/infrastructure/`. Claim and research modules keep their prompts,
+schemas, orchestration, and validation rules.
 
-The only implemented module is [`claim_kb`](claim_kb/README.md). It preserves a
-source claim PDF, runs OCR, splits logical documents, extracts metadata, chunks
-text, embeds chunks with Snowflake Cortex, stores vectors in Chroma, and exposes
-retrieval APIs for later modules.
+Both modes use the official `openai` Python SDK and the same
+`client.responses.parse()` path. `KNOWLEDGE_AGENT_MODE` selects the complete
+runtime profile; provider selection does not appear in Claim KB or research
+business logic.
+
+## Claim KB
+
+[`claim_kb`](claim_kb/README.md) accepts either one combined claim PDF or a
+folder of already separate PDFs. It runs OCR, prepares ordered documents,
+extracts metadata, and chunks text. `home` mode uses keyword retrieval without
+embeddings. `work` mode embeds chunks with Snowflake Cortex and stores vectors
+in Chroma.
 
 Synthetic example output is available in
 [`examples/claim_kb`](examples/claim_kb/README.md). These files are hand-written
-documentation examples, not runtime output or test fixtures.
+documentation examples and read-only test input, not runtime output.
 
 Run ingestion with:
 
 ```powershell
-python -m claim_kb.ingest --claim-id CLM-001 --pdf-path data/input/scanned_claim.pdf
+python -m claim_kb.cli --claim-id CLM-001 --pdf-path data/input/scanned_claim.pdf
 ```
+
+For separate document PDFs:
+
+```powershell
+python -m claim_kb.cli `
+  --claim-id PROP-B2B-2026-0417 `
+  --folder-path examples/claim_kb/sample_input
+```
+
+## Research Agent
+
+`research_agent` answers one question against one persisted Claim KB folder. It
+plans local searches, extracts cited findings, follows up for a fixed depth, and
+writes an answer using only those findings. It does not use web search.
+Retrieval is local keyword search, so it works with both Snowflake-embedded and
+keyword-only claim outputs.
+
+```mermaid
+flowchart TD
+    A["User question"] --> B["Load persisted Claim KB"]
+    B --> C["Plan claim-specific queries"]
+    C --> D["Search local chunks"]
+    D --> E["Build evidence with source_ref citations"]
+    E --> F["Extract factual findings"]
+    F --> G{"All citations exist in retrieved evidence?"}
+    G -- "No" --> H["Raise ValueError"]
+    G -- "Yes" --> I["Collect findings and follow-up questions"]
+    I --> J{"More depth and follow-ups?"}
+    J -- "Yes" --> K["Reduce breadth"]
+    K --> C
+    J -- "No" --> L["Remove duplicate findings"]
+    L --> M["Write answer from validated findings only"]
+    M --> N["Return answer and unique source_refs"]
+```
+
+Set `KNOWLEDGE_AGENT_MODE` to `home` or `work`. Home uses `OPENROUTER_MODEL`,
+`OPENROUTER_API_KEY`, and key-based Document Intelligence. Work uses
+`AZURE_OPENAI_MODEL`, an Azure AI Projects endpoint, a named Document
+Intelligence project connection, interactive browser authentication, and
+Snowflake. Copy `.env.example` to `.env`; the `.env` file is ignored by Git.
+
+Run research with:
+
+```powershell
+python -m research_agent.cli `
+  --claim-path examples/claim_kb/sample_output `
+  --question "What repairs were invoiced?"
+```
+
+The answer is followed by a `Sources:` section containing the exact
+`source_ref` values from retrieved claim chunks.
+
+Research logs append to the ignored file `logs/research_agent.log`. The default
+`INFO` level records research layers, queries, evidence counts/source refs,
+finding counts, provider status, token usage, and latency without OCR evidence
+text. Use `--log-level DEBUG` to additionally record exact LLM prompts and
+complete parsed outputs:
+
+```powershell
+python -m research_agent.cli `
+  --claim-path examples/claim_kb/sample_output `
+  --question "What repairs were invoiced?" `
+  --log-level DEBUG
+```
+
+DEBUG logs may contain claim text, findings, and final answers. No log level
+records API keys, bearer tokens, or authentication headers.
 
 Run tests with:
 
@@ -61,5 +160,22 @@ Run tests with:
 python -m pytest
 ```
 
-The future `research_agent` module should be added only when it is ready to be
-implemented. Do not add placeholder code or package scaffolding for it yet.
+Live provider contracts are opt-in:
+
+```powershell
+$env:RUN_OPENROUTER_CONTRACT_TEST="1"
+python -m pytest -m live_openrouter tests/contract/test_llm_providers.py
+
+$env:RUN_AZURE_CONTRACT_TEST="1"
+python -m pytest -m live_azure tests/contract/test_llm_providers.py
+```
+
+The Azure run includes the small research golden dataset under `evals/`.
+Work-mode ingestion opens a browser for Microsoft Entra authentication:
+
+```powershell
+$env:KNOWLEDGE_AGENT_MODE="work"
+python -m claim_kb.cli `
+  --claim-id CLM-WORK-SMOKE `
+  --folder-path examples/claim_kb/sample_input
+```

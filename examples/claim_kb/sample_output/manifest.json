@@ -1,7 +1,9 @@
 {
   "claim_id": "CLM-SAMPLE-001",
   "root_path": "data/claims/CLM-SAMPLE-001",
-  "original_pdf_path": "data/claims/CLM-SAMPLE-001/source/claim.pdf",
+  "source_files": [
+    "data/claims/CLM-SAMPLE-001/source/claim.pdf"
+  ],
   "documents": [
     {
       "id": "DOC-001",

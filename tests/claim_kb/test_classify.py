@@ -1,8 +1,8 @@
-from types import SimpleNamespace
-
-import pytest
-
-from claim_kb.classify import AzureClaimClassifier, ExtractedDocumentMetadata
+from claim_kb.classify import (
+    DocumentClassification,
+    ExtractedDocumentMetadata,
+    ResponsesClaimClassifier,
+)
 from claim_kb.schemas import (
     DocumentChunk,
     LogicalDocument,
@@ -12,32 +12,53 @@ from claim_kb.schemas import (
 )
 
 
-class FakeResponses:
+class FakeStructuredOutputClient:
     def __init__(self, parsed_outputs):
         self.parsed_outputs = list(parsed_outputs)
         self.calls = []
 
-    def parse(self, **kwargs):
-        self.calls.append(kwargs)
-        parsed = self.parsed_outputs.pop(0)
-        return SimpleNamespace(output_parsed=parsed)
-
-    def create(self, **kwargs):
-        raise AssertionError("classifier should use responses.parse, not create")
+    def parse(self, system, user, response_model):
+        self.calls.append((system, user, response_model))
+        return self.parsed_outputs.pop(0)
 
 
 def build_classifier(parsed_outputs):
-    responses = FakeResponses(parsed_outputs)
-    classifier = AzureClaimClassifier.__new__(AzureClaimClassifier)
-    classifier._model = "gpt-test"
-    classifier._client = SimpleNamespace(
-        responses=responses,
+    client = FakeStructuredOutputClient(parsed_outputs)
+    return ResponsesClaimClassifier(client), client
+
+
+def test_classify_complete_document_uses_responses_structured_parse():
+    classifier, client = build_classifier(
+        [
+            DocumentClassification(
+                title="Repair Invoice",
+                document_type="invoice",
+            )
+        ]
     )
-    return classifier, responses
+
+    result = classifier.classify_document(
+        "repair_invoice.pdf",
+        [
+            PageText(
+                claim_id="CLM-001",
+                page_number=1,
+                page_id="CLM-001:p1",
+                text="Repair Invoice\nTotal: 850.00",
+            )
+        ],
+    )
+
+    system, user, response_model = client.calls[0]
+    assert response_model is DocumentClassification
+    assert "repair_invoice.pdf" in user
+    assert "Repair Invoice" in user
+    assert "json" not in (system + user).lower()
+    assert result.document_type == "invoice"
 
 
 def test_classify_page_boundary_uses_responses_structured_parse():
-    classifier, responses = build_classifier(
+    classifier, client = build_classifier(
         [
             PageBoundaryDecision(
                 page_number=999,
@@ -72,17 +93,16 @@ def test_classify_page_boundary_uses_responses_structured_parse():
         ),
     )
 
-    call = responses.calls[0]
-    prompt_text = "\n".join(message["content"] for message in call["input"])
-    assert call["text_format"] is PageBoundaryDecision
+    system, user, response_model = client.calls[0]
+    prompt_text = system + "\n" + user
+    assert response_model is PageBoundaryDecision
     assert "json" not in prompt_text.lower()
-    assert call["model"] == "gpt-test"
     assert decision.page_number == 2
     assert decision.document_type == "invoice"
 
 
 def test_extract_document_metadata_uses_responses_structured_parse():
-    classifier, responses = build_classifier(
+    classifier, client = build_classifier(
         [
             ExtractedDocumentMetadata(
                 title="Repair Invoice",
@@ -135,11 +155,10 @@ def test_extract_document_metadata_uses_responses_structured_parse():
 
     metadata = classifier.extract_document_metadata(document, chunks)
 
-    call = responses.calls[0]
-    prompt_text = "\n".join(message["content"] for message in call["input"])
-    assert call["text_format"] is ExtractedDocumentMetadata
+    system, user, response_model = client.calls[0]
+    prompt_text = system + "\n" + user
+    assert response_model is ExtractedDocumentMetadata
     assert "json" not in prompt_text.lower()
-    assert call["model"] == "gpt-test"
     assert metadata.id == "DOC-002"
     assert metadata.page_range == PageRange(start_page=2, end_page=2)
     assert metadata.file_name == "DOC-002_invoice.pdf"
@@ -148,10 +167,3 @@ def test_extract_document_metadata_uses_responses_structured_parse():
     assert metadata.events[0].month == 6
     assert metadata.events[0].day is None
     assert metadata.events[0].source_ref == chunks[0].source_ref
-
-
-def test_parse_response_raises_when_parsed_output_is_missing():
-    classifier, _ = build_classifier([None])
-
-    with pytest.raises(ValueError, match="Expected parsed structured output"):
-        classifier._parse_response("system", "user", ExtractedDocumentMetadata)

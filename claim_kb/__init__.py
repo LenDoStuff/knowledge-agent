@@ -2,6 +2,7 @@
 
 from claim_kb.api import (
     ClaimKbApi,
+    ingest_claim_folder,
     ingest_claim_pdf,
     list_claim_documents,
     read_document_chunk,
@@ -30,6 +31,7 @@ __all__ = [
     "KnowledgeItem",
     "PageText",
     "StructuredClaimFile",
+    "ingest_claim_folder",
     "ingest_claim_pdf",
     "list_claim_documents",
     "read_document_chunk",

@@ -7,6 +7,7 @@ from claim_kb.schemas import (
     DocumentParty,
     PageRange,
     PageText,
+    StructuredClaimFile,
 )
 
 
@@ -111,3 +112,20 @@ def test_page_and_chunk_citation_fields_are_exact():
         DocumentChunk.model_validate(
             {**chunk.model_dump(), "source_ref": "wrong"}
         )
+
+
+def test_manifest_without_embedding_mode_defaults_to_snowflake():
+    manifest = StructuredClaimFile.model_validate(
+        {
+            "claim_id": "CLM-001",
+            "root_path": "data/claims/CLM-001",
+            "source_files": ["claim.pdf"],
+            "documents": [],
+            "chunk_count": 0,
+            "vector_store_path": "index/chroma",
+            "embedding_provider": "snowflake",
+            "embedding_model": "legacy-model",
+        }
+    )
+
+    assert manifest.embedding_mode == "snowflake"

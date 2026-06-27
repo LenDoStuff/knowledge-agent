@@ -1,9 +1,15 @@
-# Claim KB Example Output
+# Claim KB Examples
 
-This folder contains hand-written synthetic examples of `claim_kb` output. The
-files are documentation artifacts: they show the shape of persisted metadata,
-OCR pages, chunks, and logs without requiring Azure, Snowflake, Chroma, or a
-real claim PDF.
+This folder contains synthetic input PDFs and hand-written `claim_kb` output.
+`sample_input/` demonstrates folder ingestion with separate claim documents.
+`sample_output/` shows persisted metadata, OCR pages, chunks, and logs without
+requiring Azure, Snowflake, or Chroma. Research-agent tests load the output as
+read-only input.
+
+The folder input contains fourteen numbered PDFs. Folder ingestion OCRs each
+top-level PDF as one document, classifies it, sorts documents by type and
+filename, and copies it unchanged under the generated claim's `documents/`
+folder. It does not split these PDFs.
 
 The sample uses fake claim ID `CLM-SAMPLE-001` and two fake documents:
 
@@ -23,14 +29,19 @@ vectors only to show the schema shape. They are not real model output and should
 not be used for similarity search quality checks.
 
 Runtime ingestion output still belongs under `data/claims/<claim_id>/`, which is
-ignored by Git. Do not put real claim data, generated PDFs, Chroma files, or
-customer-derived examples in this folder.
+ignored by Git. Do not put real claim data, Chroma files, or customer-derived
+examples in this folder.
 
 ## Files
 
 ```text
 examples/claim_kb/
   README.md
+  sample_input/
+    00_claim_file_index.pdf
+    01_fnol_and_broker_notice.pdf
+    ...
+    13_coverage_reservation_memo.pdf
   sample_output/
     manifest.json
     pages.jsonl
@@ -38,6 +49,5 @@ examples/claim_kb/
     run_log.json
 ```
 
-The example intentionally omits `source/`, `documents/`, and `index/` contents.
-Those are binary or generated runtime artifacts, not useful committed
-documentation fixtures for this proof of concept.
+The output example intentionally omits `source/`, `documents/`, and `index/`
+contents. Those are runtime artifacts rather than useful output-shape fixtures.

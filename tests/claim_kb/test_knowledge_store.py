@@ -2,7 +2,7 @@ from pathlib import Path
 
 from claim_kb.knowledge_store import ClaimKbKnowledgeStore
 from claim_kb.schemas import KnowledgeItem
-from claim_kb.storage import read_jsonl
+from claim_kb.filesystem import read_jsonl
 
 
 SAMPLE_OUTPUT = (

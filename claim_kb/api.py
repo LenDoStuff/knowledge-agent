@@ -9,33 +9,34 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from claim_kb.auth import create_browser_credential
 from claim_kb.config import ClaimKbSettings
-from claim_kb.embeddings import SnowflakeAiEmbedder, TextEmbedder
+from claim_kb.embeddings import TextEmbedder
 from claim_kb.exceptions import ChunkNotFoundError, DocumentNotFoundError
-from claim_kb.ingest import (
-    IngestionServices,
-    build_live_ingestion_services,
-    ingest_claim_pdf_with_services,
-)
-from claim_kb.schemas import ChunkSearchResult, DocumentChunk, DocumentMetadata
-from claim_kb.schemas import StructuredClaimFile
-from claim_kb.storage import (
-    ChromaVectorStore,
-    VectorStore,
+from claim_kb.filesystem import (
     claim_root,
     read_claim_metadata,
     read_chunks,
 )
+from claim_kb.knowledge_store import ClaimKbKnowledgeStore
+from claim_kb.schemas import (
+    ChunkSearchResult,
+    DocumentChunk,
+    DocumentMetadata,
+    StructuredClaimFile,
+)
+from claim_kb.vector_store import VectorStore
+
+if TYPE_CHECKING:
+    from claim_kb.ingest import IngestionServices
 
 
-CredentialFactory = Callable[[ClaimKbSettings], object]
 EmbedderFactory = Callable[[ClaimKbSettings], TextEmbedder]
 VectorStoreFactory = Callable[[ClaimKbSettings, str], VectorStore]
 IngestionServicesFactory = Callable[
-    [str, ClaimKbSettings, object],
-    IngestionServices,
+    [str, ClaimKbSettings],
+    "IngestionServices",
 ]
 
 
@@ -45,25 +46,29 @@ class ClaimKbApi:
     def __init__(
         self,
         settings: ClaimKbSettings | None = None,
-        credential: object | None = None,
-        credential_factory: CredentialFactory = create_browser_credential,
-        ingestion_services_factory: IngestionServicesFactory = (
-            build_live_ingestion_services
-        ),
+        ingestion_services_factory: IngestionServicesFactory | None = None,
         embedder_factory: EmbedderFactory | None = None,
         vector_store_factory: VectorStoreFactory | None = None,
     ) -> None:
+        from claim_kb.bootstrap import (
+            build_live_embedder,
+            build_live_ingestion_services,
+            build_live_vector_store,
+        )
+
         self.settings = settings if settings is not None else ClaimKbSettings.from_env()
-        self._credential = credential
-        self._credential_factory = credential_factory
-        self._ingestion_services_factory = ingestion_services_factory
+        self._ingestion_services_factory = (
+            ingestion_services_factory
+            if ingestion_services_factory is not None
+            else build_live_ingestion_services
+        )
         self._embedder_factory = (
-            embedder_factory if embedder_factory is not None else _build_live_embedder
+            embedder_factory if embedder_factory is not None else build_live_embedder
         )
         self._vector_store_factory = (
             vector_store_factory
             if vector_store_factory is not None
-            else _build_live_vector_store
+            else build_live_vector_store
         )
 
     def ingest_claim_pdf(
@@ -71,17 +76,34 @@ class ClaimKbApi:
         claim_id: str,
         pdf_path: str | Path,
     ) -> StructuredClaimFile:
-        self.settings.require_ingestion_settings()
-        credential = self._get_credential()
+        from claim_kb.ingest import ingest_claim_pdf_with_services
+
         services = self._ingestion_services_factory(
             claim_id,
             self.settings,
-            credential,
         )
         return ingest_claim_pdf_with_services(
             claim_id=claim_id,
             pdf_path=Path(pdf_path),
-            settings=self.settings,
+            data_root=self.settings.data_root,
+            services=services,
+        )
+
+    def ingest_claim_folder(
+        self,
+        claim_id: str,
+        folder_path: str | Path,
+    ) -> StructuredClaimFile:
+        from claim_kb.ingest import ingest_claim_folder_with_services
+
+        services = self._ingestion_services_factory(
+            claim_id,
+            self.settings,
+        )
+        return ingest_claim_folder_with_services(
+            claim_id=claim_id,
+            folder_path=Path(folder_path),
+            data_root=self.settings.data_root,
             services=services,
         )
 
@@ -95,8 +117,20 @@ class ClaimKbApi:
         document_types: list[str] | None = None,
         top_k: int = 10,
     ) -> list[ChunkSearchResult]:
-        self.settings.require_retrieval_settings()
         claim_file = read_claim_metadata(self.settings.data_root, claim_id)
+        if claim_file.embedding_mode == "none":
+            store = ClaimKbKnowledgeStore(
+                claim_root(self.settings.data_root, claim_id)
+            )
+            return store.search_chunks(
+                query,
+                document_types=document_types,
+                top_k=top_k,
+            )
+
+        self.settings.require_retrieval_settings()
+        if claim_file.embedding_model is None:
+            raise ValueError("Snowflake claim manifest is missing embedding_model")
         search_settings = replace(
             self.settings,
             snowflake_embedding_model=claim_file.embedding_model,
@@ -134,14 +168,19 @@ class ClaimKbApi:
             f"for claim {claim_id}"
         )
 
-    def _get_credential(self) -> object:
-        if self._credential is None:
-            self._credential = self._credential_factory(self.settings)
-        return self._credential
 
-
-def ingest_claim_pdf(claim_id: str, pdf_path: str | Path) -> StructuredClaimFile:
+def ingest_claim_pdf(
+    claim_id: str,
+    pdf_path: str | Path,
+) -> StructuredClaimFile:
     return ClaimKbApi().ingest_claim_pdf(claim_id, pdf_path)
+
+
+def ingest_claim_folder(
+    claim_id: str,
+    folder_path: str | Path,
+) -> StructuredClaimFile:
+    return ClaimKbApi().ingest_claim_folder(claim_id, folder_path)
 
 
 def list_claim_documents(claim_id: str) -> list[DocumentMetadata]:
@@ -163,17 +202,3 @@ def read_document_chunk(
     chunk_id: str,
 ) -> DocumentChunk:
     return ClaimKbApi().read_document_chunk(claim_id, document_id, chunk_id)
-
-
-def _build_live_embedder(
-    settings: ClaimKbSettings,
-) -> TextEmbedder:
-    return SnowflakeAiEmbedder(settings)
-
-
-def _build_live_vector_store(
-    settings: ClaimKbSettings,
-    claim_id: str,
-) -> VectorStore:
-    root = claim_root(settings.data_root, claim_id)
-    return ChromaVectorStore(claim_id, root / "index" / "chroma")

@@ -1,5 +1,5 @@
 from claim_kb.schemas import DocumentChunk, PageRange
-from claim_kb.storage import ChromaVectorStore
+from claim_kb.vector_store import ChromaVectorStore
 
 
 def test_chroma_vector_store_indexes_searches_and_filters(tmp_path):

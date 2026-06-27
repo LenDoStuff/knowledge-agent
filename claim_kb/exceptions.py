@@ -1,12 +1,10 @@
 """Domain exceptions for claim knowledge base operations."""
 
+from knowledge_agent.infrastructure.config import ConfigurationError
+
 
 class ClaimKbError(Exception):
     """Base exception for claim knowledge base failures."""
-
-
-class ConfigurationError(ClaimKbError):
-    """Raised when required runtime configuration is missing or invalid."""
 
 
 class ClaimNotFoundError(ClaimKbError):

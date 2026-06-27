@@ -3,10 +3,10 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "claim-kb"
+name = "knowledge-agent"
 version = "0.1.0"
-description = "Backend pipeline for turning scanned claim PDFs into structured claim knowledge bases."
-readme = "claim_kb/README.md"
+description = "Claim knowledge base ingestion and cited local research agents."
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "azure-ai-documentintelligence>=1.0.0",
@@ -15,6 +15,7 @@ dependencies = [
     "chromadb>=1.0.0",
     "openai>=2.44.0",
     "pydantic>=2.7",
+    "python-dotenv>=1.0",
     "pypdf>=4.2",
     "snowflake-snowpark-python>=1.35.0",
 ]
@@ -25,8 +26,12 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["claim_kb*"]
+include = ["claim_kb*", "knowledge_agent*", "research_agent*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "live_openrouter: calls the configured live OpenRouter model",
+    "live_azure: calls the configured live Azure AI Projects deployment",
+]

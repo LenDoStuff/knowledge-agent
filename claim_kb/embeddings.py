@@ -4,9 +4,6 @@ from __future__ import annotations
 
 from typing import Protocol, Sequence
 
-from claim_kb.config import ClaimKbSettings
-
-
 class TextEmbedder(Protocol):
     embedding_provider: str
     embedding_model: str
@@ -21,9 +18,9 @@ class TextEmbedder(Protocol):
 class SnowflakeAiEmbedder:
     embedding_provider = "snowflake"
 
-    def __init__(self, settings: ClaimKbSettings) -> None:
-        self.embedding_model = settings.snowflake_embedding_model
-        self._session = create_snowflake_session(settings)
+    def __init__(self, connection_name: str, embedding_model: str) -> None:
+        self.embedding_model = embedding_model
+        self._session = create_snowflake_session(connection_name)
 
     def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
         if not texts:
@@ -52,13 +49,13 @@ class SnowflakeAiEmbedder:
         self._session.close()
 
 
-def create_snowflake_session(settings: ClaimKbSettings):
+def create_snowflake_session(connection_name: str):
     from snowflake.snowpark import Session
 
     return (
         Session.builder.config(
             "connection_name",
-            settings.snowflake_connection_name,
+            connection_name,
         ).create()
     )
 

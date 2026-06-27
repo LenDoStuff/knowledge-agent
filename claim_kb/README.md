@@ -1,7 +1,8 @@
 # Claim KB
 
-`claim_kb` turns one scanned insurance claim PDF into a structured, searchable
-claim knowledge base.
+`claim_kb` turns scanned insurance claim documents into a structured,
+searchable claim knowledge base. It accepts either one combined PDF or a folder
+of PDFs that are already separate documents.
 
 This is the first module in the project. It is intentionally a proof of
 concept: keep behavior explicit, keep the folder structure simple, and avoid
@@ -11,39 +12,58 @@ No frontend or UI is included.
 
 ## Input
 
-The ingestion pipeline requires:
+Every ingestion requires a stable `claim_id`, for example `CLM-001`, and exactly
+one input:
 
-- `claim_id`: stable claim identifier, for example `CLM-001`
-- `pdf_path`: path to one scanned claim PDF, for example
-  `data/input/scanned_claim.pdf`
+- `pdf_path`: one combined claim PDF that must be split into logical documents
+- `folder_path`: a folder whose top-level PDFs are already separate documents
 
-Run ingestion with:
+Run combined-PDF ingestion with:
 
 ```powershell
-python -m claim_kb.ingest --claim-id CLM-001 --pdf-path data/input/scanned_claim.pdf
+python -m claim_kb.cli --claim-id CLM-001 --pdf-path data/input/scanned_claim.pdf
 ```
+
+`KNOWLEDGE_AGENT_MODE` determines the complete runtime profile. `home` uses
+OpenRouter, API-key Document Intelligence, and keyword retrieval without an
+index. `work` uses Azure AI Projects with browser authentication, resolves
+Document Intelligence from a named project connection, and builds Snowflake
+embeddings plus a Chroma index.
 
 The PDF may contain many logical documents in one scanned file, such as FNOL,
 emails, loss adjuster reports, invoices, or other claim documents.
 
+Run folder ingestion with:
+
+```powershell
+python -m claim_kb.cli `
+  --claim-id PROP-B2B-2026-0417 `
+  --folder-path examples/claim_kb/sample_input
+```
+
+Folder ingestion processes only top-level `.pdf` files. Each PDF is OCR'd and
+classified as one complete document; it is never split. Documents are sorted
+by extracted document type and then original filename before `DOC-###` IDs and
+claim-global page numbers are assigned.
+
 ## What It Does
 
-1. Copies the original scanned PDF into the claim folder.
-2. Runs Azure Document Intelligence OCR with `prebuilt-layout`.
-3. Classifies each page using the current page, prior page, and current document
-   context to decide whether it starts a new document or continues the previous
-   document.
-4. Writes split PDF files for each logical document.
-5. Chunks OCR text by document and page range, assigning stable page IDs and
+1. Runs Azure Document Intelligence OCR with `prebuilt-layout`.
+2. For a combined PDF, detects page boundaries and writes split logical
+   documents. For a folder, classifies and sorts the complete PDFs without
+   splitting them.
+3. Chunks OCR text by document and page range, assigning stable page IDs and
    chunk citation references.
-6. Extracts metadata for each logical document:
+4. Extracts metadata for each logical document:
    `id`, `title`, `summary`, `involved_parties`, `events`,
    `document_type`, and `page_range`.
    Event dates use nullable numeric `year`, `month`, and `day` fields, and every
    event cites a supporting chunk through `source_ref`.
-7. Embeds each chunk with Snowflake Cortex `AI_EMBED`.
-8. Stores chunk vectors in a claim-local Chroma vector store.
-9. Exposes listing, search, and chunk-read functions through `claim_kb.api`.
+5. In `work` mode, embeds each chunk with Snowflake Cortex `AI_EMBED`.
+6. In `work` mode, stores chunk vectors in a claim-local Chroma vector store.
+   In `home` mode, leaves embeddings empty and does not create an index.
+7. Exposes ingestion, listing, search, and chunk-read functions through
+   `claim_kb.api`.
 
 If an expected service response, persisted file, metadata field, or vector-store
 shape is missing, the module should fail clearly instead of silently inventing a
@@ -69,24 +89,26 @@ data/claims/CLM-001/
   chunks.jsonl
   run_log.json
 
+  # snowflake mode only
   index/
     chroma/
 ```
 
 Important output files:
 
-- `source/claim.pdf`: preserved source PDF
-- `documents/*.pdf`: logical document PDFs split from the source
+- `source/claim.pdf`: preserved combined source PDF, when that input mode is used
+- `documents/*.pdf`: split documents for combined input, or unchanged
+  original-name PDFs for folder input
 - `manifest.json`: claim manifest and one metadata record per logical document
 - `pages.jsonl`: OCR text and stable page IDs such as `CLM-001:p1`
-- `chunks.jsonl`: chunk text, embeddings, page IDs, and stable citation
+- `chunks.jsonl`: chunk text, optional embeddings, page IDs, and stable citation
   references such as `CLM-001/DOC-001#DOC-001-CHUNK-001`
-- `index/chroma/`: local vector index for retrieval
+- `index/chroma/`: local vector index for retrieval in `snowflake` mode only
 - `run_log.json`: step-level ingestion status
 
-`manifest.json` records the documents, embedding provider, and model used for
-the claim. Search uses that stored model when embedding the query, so query
-vectors match the vectors already saved in Chroma.
+`manifest.json` records the ordered `source_files`, documents, and
+`embedding_mode`. In `snowflake` mode it also records the embedding provider,
+model, and vector-store path. In `none` mode those fields are `null`.
 
 ## Examples
 
@@ -109,6 +131,11 @@ claim_file = kb.ingest_claim_pdf(
     pdf_path="data/input/scanned_claim.pdf",
 )
 
+folder_claim = kb.ingest_claim_folder(
+    claim_id="PROP-B2B-2026-0417",
+    folder_path="examples/claim_kb/sample_input",
+)
+
 documents = kb.list_claim_documents("CLM-001")
 
 results = kb.search_claim_file(
@@ -129,6 +156,7 @@ Convenience functions are also available:
 
 ```python
 from claim_kb.api import (
+    ingest_claim_folder,
     ingest_claim_pdf,
     list_claim_documents,
     read_document_chunk,
@@ -157,7 +185,15 @@ document metadata, page IDs, and citation-ready `source_ref`.
 Core functions:
 
 ```python
-ingest_claim_pdf(claim_id: str, pdf_path: str) -> StructuredClaimFile
+ingest_claim_pdf(
+    claim_id: str,
+    pdf_path: str,
+) -> StructuredClaimFile
+
+ingest_claim_folder(
+    claim_id: str,
+    folder_path: str,
+) -> StructuredClaimFile
 
 list_claim_documents(claim_id: str) -> list[DocumentMetadata]
 
@@ -184,39 +220,69 @@ Search results include:
 - `score`
 - `document_type`
 
+`search_claim_file()` reads the persisted `embedding_mode`: it uses Snowflake
+query embeddings and Chroma for `snowflake` claims, and the same local keyword
+ranking as the lexical knowledge store for `none` claims. Keyword scores are
+raw matched-term occurrence counts; equal scores retain chunk order.
+
 ## Configuration
 
-Azure OCR/classification authentication is keyless through Microsoft Entra ID
-browser sign-in. The code uses `InteractiveBrowserCredential` and does not
-require Azure API keys.
+Azure identity and OpenAI-compatible client construction are shared through
+`knowledge_agent.infrastructure`; Claim KB keeps only its claim-specific OCR,
+classification, ingestion, and persistence behavior.
 
-Embeddings are generated through Snowflake Cortex `AI_EMBED`. The code creates a
-Snowpark session from your local Snowflake TOML connection config.
+`KNOWLEDGE_AGENT_MODE` is required and accepts only `home` or `work`.
+The former `LLM_PROVIDER`, `LLM_MODEL`, and `--embedding-mode` switches are not
+supported; the selected mode owns those decisions.
 
-Required for live ingestion:
+Home mode requires:
 
-- `AZURE_AI_PROJECT_ENDPOINT`
+- `OPENROUTER_MODEL`
+- `OPENROUTER_API_KEY`
 - `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT`
-- `AZURE_OPENAI_DEPLOYMENT`
+- `AZURE_DOCUMENT_INTELLIGENCE_API_KEY`
+
+Work mode requires:
+
+- `AZURE_OPENAI_MODEL`
+- `AZURE_AI_PROJECT_ENDPOINT`
+- `AZURE_DOCUMENT_INTELLIGENCE_CONNECTION_NAME`
+
+The named project connection supplies the Document Intelligence endpoint only.
+One `InteractiveBrowserCredential` authenticates both Azure AI Projects and the
+Document Intelligence client. The connection target must be a custom-subdomain
+endpoint that supports Microsoft Entra authentication.
+
+Work embeddings are generated through Snowflake Cortex `AI_EMBED`; the code
+creates a Snowpark session from the local Snowflake TOML connection config.
+Home does not create Snowflake or Chroma clients.
 
 Optional:
 
-- `AZURE_TENANT_ID`: tenant to use for browser sign-in
+- `LLM_REASONING_EFFORT`: `low`, `medium`, or `high`; defaults to `medium`
 - `SNOWFLAKE_CONNECTION_NAME`: local Snowflake connection name, defaults to
   `default`
 - `SNOWFLAKE_EMBEDDING_MODEL`: Snowflake `AI_EMBED` model, defaults to
   `snowflake-arctic-embed-l-v2.0`
 - `CLAIM_KB_DATA_ROOT`: output root, defaults to `data/claims`
 
-The Document Intelligence endpoint must be a custom subdomain endpoint for
-Microsoft Entra authentication, not a regional endpoint.
-
-Example PowerShell configuration:
+Example home configuration:
 
 ```powershell
-$env:AZURE_AI_PROJECT_ENDPOINT="https://example.services.ai.azure.com/api/projects/my-project"
+$env:KNOWLEDGE_AGENT_MODE="home"
+$env:OPENROUTER_MODEL="provider/model"
+$env:OPENROUTER_API_KEY="..."
 $env:AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT="https://my-doc-intel.cognitiveservices.azure.com"
-$env:AZURE_OPENAI_DEPLOYMENT="gpt-4.1"
+$env:AZURE_DOCUMENT_INTELLIGENCE_API_KEY="..."
+```
+
+Example work configuration:
+
+```powershell
+$env:KNOWLEDGE_AGENT_MODE="work"
+$env:AZURE_OPENAI_MODEL="my-azure-deployment"
+$env:AZURE_AI_PROJECT_ENDPOINT="https://example.services.ai.azure.com/api/projects/my-project"
+$env:AZURE_DOCUMENT_INTELLIGENCE_CONNECTION_NAME="document-intelligence"
 $env:SNOWFLAKE_CONNECTION_NAME="default"
 $env:SNOWFLAKE_EMBEDDING_MODEL="snowflake-arctic-embed-l-v2.0"
 ```
@@ -235,5 +301,6 @@ Run tests:
 python -m pytest
 ```
 
-The tests use mocked Azure and Snowflake clients plus a generated sample PDF, so
-they do not open browser auth or call live Azure/Snowflake services.
+The default tests use mocked provider and Snowflake clients plus generated
+single-PDF and folder inputs. Live OpenRouter and Azure tests are separately
+marked and opt-in.

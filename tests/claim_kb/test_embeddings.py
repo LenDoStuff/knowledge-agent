@@ -1,4 +1,3 @@
-from claim_kb.config import ClaimKbSettings
 from claim_kb.embeddings import SnowflakeAiEmbedder
 
 
@@ -39,18 +38,12 @@ def test_snowflake_ai_embedder_returns_ordered_embeddings(monkeypatch):
     session = FakeSession()
     monkeypatch.setattr(
         "claim_kb.embeddings.create_snowflake_session",
-        lambda settings: session,
+        lambda connection_name: session,
     )
-    settings = ClaimKbSettings(
-        data_root="data/claims",
-        ai_project_endpoint="https://example.services.ai.azure.com/api/projects/proj",
-        document_intelligence_endpoint="https://example.cognitiveservices.azure.com",
-        openai_deployment="gpt-test",
-        tenant_id=None,
-        snowflake_connection_name="default",
-        snowflake_embedding_model="snowflake-arctic-embed-l-v2.0",
+    embedder = SnowflakeAiEmbedder(
+        connection_name="default",
+        embedding_model="snowflake-arctic-embed-l-v2.0",
     )
-    embedder = SnowflakeAiEmbedder(settings)
 
     embeddings = embedder.embed_texts(["alpha", "beta"])
     embedder.close()

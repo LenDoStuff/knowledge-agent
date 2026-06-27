@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
-from claim_kb.config import ClaimKbSettings
 from claim_kb.schemas import PageText, page_id_for
 
 
@@ -13,14 +12,16 @@ class OcrClient(Protocol):
     def extract_pages(self, claim_id: str, pdf_path: Path) -> list[PageText]:
         ...
 
+    def close(self) -> None:
+        ...
+
 
 class AzureDocumentIntelligenceOcrClient:
-    def __init__(self, settings: ClaimKbSettings, credential: object) -> None:
-        settings.validate_document_intelligence_endpoint()
+    def __init__(self, endpoint: str, credential: object) -> None:
         from azure.ai.documentintelligence import DocumentIntelligenceClient
 
         self._client = DocumentIntelligenceClient(
-            endpoint=settings.document_intelligence_endpoint,
+            endpoint=endpoint,
             credential=credential,
         )
 
@@ -44,3 +45,6 @@ class AzureDocumentIntelligenceOcrClient:
                 )
             )
         return sorted(pages, key=lambda item: item.page_number)
+
+    def close(self) -> None:
+        self._client.close()

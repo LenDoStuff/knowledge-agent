@@ -1,0 +1,11 @@
+[
+  {
+    "question": "What repairs were invoiced?",
+    "required_source_refs": [
+      "CLM-SAMPLE-001/DOC-002#DOC-002-CHUNK-001"
+    ],
+    "required_terms": [
+      "bumper"
+    ]
+  }
+]

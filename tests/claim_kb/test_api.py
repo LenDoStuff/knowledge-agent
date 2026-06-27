@@ -1,6 +1,12 @@
 import pytest
 
-from claim_kb import ClaimKbApi, DocumentEvent, DocumentParty, search_claim_file
+from claim_kb import (
+    ClaimKbApi,
+    DocumentEvent,
+    DocumentParty,
+    ingest_claim_folder,
+    search_claim_file,
+)
 from claim_kb.config import ClaimKbSettings
 from claim_kb.exceptions import ChunkNotFoundError, DocumentNotFoundError
 from claim_kb.schemas import (
@@ -8,9 +14,10 @@ from claim_kb.schemas import (
     DocumentChunk,
     DocumentMetadata,
     PageRange,
+    PageText,
     StructuredClaimFile,
 )
-from claim_kb.storage import (
+from claim_kb.filesystem import (
     ensure_claim_dirs,
     write_claim_metadata,
     write_jsonl,
@@ -101,7 +108,7 @@ def test_claim_kb_api_supports_internal_module_usage(tmp_path):
         StructuredClaimFile(
             claim_id="CLM-001",
             root_path=str(root),
-            original_pdf_path=str(root / "source" / "claim.pdf"),
+            source_files=[str(root / "source" / "claim.pdf")],
             documents=documents,
             chunk_count=1,
             vector_store_path=str(root / "index" / "chroma"),
@@ -111,10 +118,7 @@ def test_claim_kb_api_supports_internal_module_usage(tmp_path):
     )
     settings = ClaimKbSettings(
         data_root=data_root,
-        ai_project_endpoint="https://example.services.ai.azure.com/api/projects/proj",
         document_intelligence_endpoint="https://example.cognitiveservices.azure.com",
-        openai_deployment="gpt-test",
-        tenant_id=None,
         snowflake_connection_name="default",
         snowflake_embedding_model="configured-snowflake-model",
     )
@@ -127,7 +131,6 @@ def test_claim_kb_api_supports_internal_module_usage(tmp_path):
 
     api = ClaimKbApi(
         settings=settings,
-        credential=object(),
         embedder_factory=build_embedder,
         vector_store_factory=lambda settings, claim_id: vector_store,
     )
@@ -157,11 +160,158 @@ def test_claim_kb_api_supports_internal_module_usage(tmp_path):
     assert vector_store.closed
 
 
+def test_claim_kb_api_searches_keyword_only_claim_without_vector_services(tmp_path):
+    data_root = tmp_path / "claims"
+    root = ensure_claim_dirs(data_root, "CLM-KEYWORD")
+    documents = [
+        DocumentMetadata(
+            id="DOC-001",
+            title="Repair Invoice",
+            summary="Garage bill",
+            document_type="invoice",
+            page_range=PageRange(start_page=1, end_page=1),
+            file_name="invoice.pdf",
+        ),
+        DocumentMetadata(
+            id="DOC-002",
+            title="First Notice",
+            summary="Initial claim",
+            document_type="fnol",
+            page_range=PageRange(start_page=2, end_page=2),
+            file_name="fnol.pdf",
+        ),
+    ]
+    pages = [
+        PageText(
+            claim_id="CLM-KEYWORD",
+            page_number=1,
+            page_id="CLM-KEYWORD:p1",
+            text="Repair total 850 shared",
+        ),
+        PageText(
+            claim_id="CLM-KEYWORD",
+            page_number=2,
+            page_id="CLM-KEYWORD:p2",
+            text="Repair was reported shared",
+        ),
+    ]
+    chunks = [
+        DocumentChunk(
+            claim_id="CLM-KEYWORD",
+            document_id="DOC-001",
+            chunk_id="DOC-001-CHUNK-001",
+            source_ref="CLM-KEYWORD/DOC-001#DOC-001-CHUNK-001",
+            chunk_index=0,
+            document_type="invoice",
+            page_range=PageRange(start_page=1, end_page=1),
+            page_ids=["CLM-KEYWORD:p1"],
+            text="Repair total 850 shared",
+        ),
+        DocumentChunk(
+            claim_id="CLM-KEYWORD",
+            document_id="DOC-002",
+            chunk_id="DOC-002-CHUNK-001",
+            source_ref="CLM-KEYWORD/DOC-002#DOC-002-CHUNK-001",
+            chunk_index=1,
+            document_type="fnol",
+            page_range=PageRange(start_page=2, end_page=2),
+            page_ids=["CLM-KEYWORD:p2"],
+            text="Repair was reported shared",
+        ),
+    ]
+    write_jsonl(
+        root / "pages.jsonl",
+        [page.model_dump(mode="json") for page in pages],
+    )
+    write_jsonl(
+        root / "chunks.jsonl",
+        [chunk.model_dump(mode="json") for chunk in chunks],
+    )
+    write_claim_metadata(
+        root,
+        StructuredClaimFile(
+            claim_id="CLM-KEYWORD",
+            root_path=str(root),
+            source_files=[str(root / "invoice.pdf")],
+            documents=documents,
+            chunk_count=2,
+            vector_store_path=None,
+            embedding_provider=None,
+            embedding_model=None,
+            embedding_mode="none",
+        ),
+    )
+    settings = ClaimKbSettings(
+        data_root=data_root,
+        document_intelligence_endpoint=None,
+        snowflake_connection_name="",
+        snowflake_embedding_model="",
+    )
+
+    def unexpected_factory(*args):
+        raise AssertionError("keyword search must not construct vector services")
+
+    api = ClaimKbApi(
+        settings=settings,
+        embedder_factory=unexpected_factory,
+        vector_store_factory=unexpected_factory,
+    )
+
+    results = api.search_claim_file(
+        "CLM-KEYWORD",
+        "repair total",
+        document_types=["invoice"],
+        top_k=5,
+    )
+
+    assert [result.chunk_id for result in results] == ["DOC-001-CHUNK-001"]
+    assert results[0].score == 3.0
+    assert api.search_claim_file("CLM-KEYWORD", "repair", top_k=1)[
+        0
+    ].document_type == "invoice"
+    assert [
+        result.chunk_id
+        for result in api.search_claim_file("CLM-KEYWORD", "shared", top_k=2)
+    ] == ["DOC-001-CHUNK-001", "DOC-002-CHUNK-001"]
+    assert api.search_claim_file(
+        "CLM-KEYWORD",
+        "repair",
+        document_types=["policy"],
+    ) == []
+    with pytest.raises(ValueError, match="searchable text"):
+        api.search_claim_file("CLM-KEYWORD", "  ")
+    with pytest.raises(ValueError, match="top_k"):
+        api.search_claim_file("CLM-KEYWORD", "repair", top_k=0)
+
+
 def test_package_level_imports_expose_api_facade():
     assert ClaimKbApi.__name__ == "ClaimKbApi"
     assert DocumentEvent.__name__ == "DocumentEvent"
     assert DocumentParty.__name__ == "DocumentParty"
+    assert callable(ingest_claim_folder)
     assert callable(search_claim_file)
+
+
+def test_ingestion_api_uses_mode_derived_services(tmp_path):
+    calls = []
+
+    def record_factory(claim_id, settings):
+        calls.append(claim_id)
+        raise RuntimeError("factory called")
+
+    api = ClaimKbApi(
+        settings=ClaimKbSettings(
+            data_root=tmp_path,
+            document_intelligence_endpoint=None,
+            snowflake_connection_name="default",
+            snowflake_embedding_model="model",
+        ),
+        ingestion_services_factory=record_factory,
+    )
+
+    with pytest.raises(RuntimeError, match="factory called"):
+        api.ingest_claim_pdf("CLM-001", "claim.pdf")
+    assert calls == ["CLM-001"]
 
 
 def test_read_document_chunk_errors(tmp_path):
@@ -187,10 +337,7 @@ def test_read_document_chunk_errors(tmp_path):
     api = ClaimKbApi(
         settings=ClaimKbSettings(
             data_root=data_root,
-            ai_project_endpoint=None,
             document_intelligence_endpoint=None,
-            openai_deployment=None,
-            tenant_id=None,
             snowflake_connection_name="default",
             snowflake_embedding_model="snowflake-arctic-embed-l-v2.0",
         )

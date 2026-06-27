@@ -7,6 +7,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from claim_kb.config import EmbeddingMode
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -189,12 +191,13 @@ class ChunkSearchResult(BaseModel):
 class StructuredClaimFile(BaseModel):
     claim_id: str
     root_path: str
-    original_pdf_path: str
+    source_files: list[str] = Field(min_length=1)
     documents: list[DocumentMetadata]
     chunk_count: int
-    vector_store_path: str
-    embedding_provider: str
-    embedding_model: str
+    vector_store_path: str | None
+    embedding_provider: str | None
+    embedding_model: str | None
+    embedding_mode: EmbeddingMode = "snowflake"
     created_at: datetime = Field(default_factory=utc_now)
 
     @model_validator(mode="after")
