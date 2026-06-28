@@ -57,6 +57,27 @@ page IDs and `source_ref` citations to the research loop.
 Research logs append to `logs/research.log`. `DEBUG` logging includes prompts,
 claim evidence, findings, and answers.
 
+## Claim Research Workbench
+
+The Streamlit workbench combines ingestion, knowledge-base inspection, and a
+context-aware research chat:
+
+```powershell
+streamlit run knowledge_agent/app.py
+```
+
+Select an existing claim from `CLAIM_DATA_ROOT`, or ingest either one combined
+claim PDF or several already-separated document PDFs from the sidebar. The
+knowledge-base tab shows document metadata, parties, events, evidence chunks,
+OCR page text, an aggregate timeline, a claim-wide party list, and exact source
+references. The chat tab researches only the selected claim, keeps its
+conversation history for the current browser session, annotates answers with
+source tooltips, and exposes the agent's steps and retrieval tool calls.
+
+The app uses the active `KNOWLEDGE_AGENT_PROFILE` and the same `.env` provider
+configuration as the CLIs. Credentials remain server-side and are never entered
+through the UI. Existing claim IDs are not overwritten.
+
 ## Tests
 
 ```powershell

@@ -1,4 +1,4 @@
-"""Structured OpenAI Responses client."""
+"""Structured output client for the configured model provider."""
 
 from __future__ import annotations
 
@@ -62,11 +62,15 @@ class ResponsesClient:
         user: str,
         response_model: type[ParsedModel],
     ) -> ParsedModel:
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        if self._settings.profile == "api_key":
+            return self._parse_openrouter(messages, response_model)
+
         response = self._request(
-            input=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
+            input=messages,
             text_format=response_model,
         )
         parsed = getattr(response, "output_parsed", None)
@@ -84,6 +88,84 @@ class ResponsesClient:
                 provider=self._settings.provider,
                 category="output",
                 request_id=_request_id(response),
+            )
+        return parsed
+
+    def _parse_openrouter(
+        self,
+        messages: list[dict[str, str]],
+        response_model: type[ParsedModel],
+    ) -> ParsedModel:
+        started = perf_counter()
+        self._logger.info(
+            "llm_request provider=%s model=%s api=chat_completions retry_count=0",
+            self._settings.provider,
+            self._settings.model,
+        )
+        try:
+            completion = self._client.chat.completions.parse(
+                model=self._settings.model,
+                messages=messages,
+                response_format=response_model,
+                temperature=0,
+                extra_body={"provider": {"require_parameters": True}},
+            )
+        except Exception as exc:
+            error = self._normalize_error(exc)
+            self._logger.error(
+                "llm_error provider=%s model=%s api=chat_completions "
+                "category=%s request_id=%s status_code=%s latency_ms=%d "
+                "retry_count=0",
+                self._settings.provider,
+                self._settings.model,
+                error.category,
+                error.request_id,
+                error.status_code,
+                round((perf_counter() - started) * 1000),
+            )
+            raise error from None
+
+        request_id = _request_id(completion)
+        choice = completion.choices[0] if completion.choices else None
+        message = getattr(choice, "message", None)
+        finish_reason = getattr(choice, "finish_reason", None)
+        usage = _chat_usage(completion)
+        self._logger.info(
+            "llm_response provider=%s model=%s api=chat_completions "
+            "request_id=%s finish_reason=%s input_tokens=%s output_tokens=%s "
+            "reasoning_tokens=%s latency_ms=%d retry_count=0",
+            self._settings.provider,
+            self._settings.model,
+            request_id,
+            finish_reason,
+            usage["input_tokens"],
+            usage["output_tokens"],
+            usage["reasoning_tokens"],
+            round((perf_counter() - started) * 1000),
+        )
+        if finish_reason == "length":
+            raise LlmError(
+                "The response was incomplete: output token limit",
+                provider=self._settings.provider,
+                category="incomplete",
+                request_id=request_id,
+            )
+        refusal = getattr(message, "refusal", None)
+        parsed = getattr(message, "parsed", None)
+        if parsed is None:
+            category = "refusal" if refusal else "output"
+            raise LlmError(
+                f"Missing structured output for {response_model.__name__}",
+                provider=self._settings.provider,
+                category=category,
+                request_id=request_id,
+            )
+        if not isinstance(parsed, response_model):
+            raise LlmError(
+                f"Invalid structured output for {response_model.__name__}",
+                provider=self._settings.provider,
+                category="output",
+                request_id=request_id,
             )
         return parsed
 
@@ -202,5 +284,15 @@ def _usage(response: Any) -> dict[str, int | None]:
     return {
         "input_tokens": getattr(usage, "input_tokens", None),
         "output_tokens": getattr(usage, "output_tokens", None),
+        "reasoning_tokens": getattr(output_details, "reasoning_tokens", None),
+    }
+
+
+def _chat_usage(response: Any) -> dict[str, int | None]:
+    usage = getattr(response, "usage", None)
+    output_details = getattr(usage, "completion_tokens_details", None)
+    return {
+        "input_tokens": getattr(usage, "prompt_tokens", None),
+        "output_tokens": getattr(usage, "completion_tokens", None),
         "reasoning_tokens": getattr(output_details, "reasoning_tokens", None),
     }

@@ -57,6 +57,14 @@ class ClaimStore:
     def documents(self) -> list[DocumentMetadata]:
         return self.manifest.documents
 
+    @property
+    def pages(self) -> list[PageText]:
+        return list(self._pages.values())
+
+    @property
+    def chunks(self) -> list[DocumentChunk]:
+        return [self._chunks[chunk_id] for chunk_id in self._chunk_order]
+
     def search(
         self,
         query: str,

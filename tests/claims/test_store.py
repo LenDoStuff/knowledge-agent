@@ -50,6 +50,19 @@ def test_knowledge_store_loads_searches_and_reads_sample_output():
     assert "First Notice of Loss" in page.text
 
 
+def test_knowledge_store_exposes_ordered_pages_and_chunks_for_inspection():
+    store = ClaimStore(SAMPLE_OUTPUT)
+
+    assert [page.page_id for page in store.pages] == [
+        "CLM-SAMPLE-001:p1",
+        "CLM-SAMPLE-001:p2",
+    ]
+    assert [chunk.chunk_id for chunk in store.chunks] == [
+        "DOC-001-CHUNK-001",
+        "DOC-002-CHUNK-001",
+    ]
+
+
 def test_knowledge_store_searches_document_metadata():
     store = ClaimStore(SAMPLE_OUTPUT)
 
