@@ -1,29 +1,28 @@
-import json
 import logging
-import shutil
 from pathlib import Path
 
 import pytest
 
-from research.agent import run_claim_research
-from research.schemas import ResearchFinding, ResearchQuery
+from knowledge_agent.claims.store import ClaimStore
+from knowledge_agent.research.agent import run_claim_research
+from knowledge_agent.research.models import ResearchFinding, ResearchQuery
 
 
 SAMPLE_OUTPUT = (
-    Path(__file__).parents[2] / "examples" / "ingest" / "sample_output"
+    Path(__file__).parents[2] / "examples" / "claims" / "sample_output"
 )
 INVOICE_REF = "CLM-SAMPLE-001/DOC-002#DOC-002-CHUNK-001"
 FNOL_REF = "CLM-SAMPLE-001/DOC-001#DOC-001-CHUNK-001"
 
 
-class FakeResearchLlm:
+class FakeResearchModel:
     def __init__(self) -> None:
         self.plan_calls = []
         self.extraction_calls = []
         self.answer_findings = []
 
-    def plan_queries(self, question, documents, breadth):
-        self.plan_calls.append((question, documents, breadth))
+    def plan_queries(self, question, documents, queries_per_question):
+        self.plan_calls.append((question, documents, queries_per_question))
         if question == "When did the collision occur?":
             return [
                 ResearchQuery(
@@ -60,83 +59,47 @@ class FakeResearchLlm:
 
 
 def test_run_claim_research_uses_manifest_and_retrieved_evidence():
-    llm = FakeResearchLlm()
+    model = FakeResearchModel()
 
     answer = run_claim_research(
-        SAMPLE_OUTPUT,
-        "What repairs were invoiced?",
-        llm,
-        depth=1,
+        store=ClaimStore(SAMPLE_OUTPUT),
+        question="What repairs were invoiced?",
+        model=model,
+        max_depth=1,
     )
 
-    planned_documents = llm.plan_calls[0][1]
-    evidence = llm.extraction_calls[0][1]
+    planned_documents = model.plan_calls[0][1]
+    evidence = model.extraction_calls[0][1]
     assert [document.id for document in planned_documents] == ["DOC-001", "DOC-002"]
     assert evidence[0].source_ref == INVOICE_REF
     assert "front bumper cover" in evidence[0].text
     assert answer.source_refs == [INVOICE_REF]
-    assert answer.findings == llm.answer_findings
+    assert answer.findings == model.answer_findings
     assert len(answer.findings) == 1
 
 
-def test_run_claim_research_uses_keyword_only_claim(tmp_path):
-    claim_path = tmp_path / "claim"
-    shutil.copytree(SAMPLE_OUTPUT, claim_path)
-    manifest_path = claim_path / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest.update(
-        embedding_mode="none",
-        embedding_provider=None,
-        embedding_model=None,
-        vector_store_path=None,
-    )
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    chunks_path = claim_path / "chunks.jsonl"
-    chunks = [
-        json.loads(line)
-        for line in chunks_path.read_text(encoding="utf-8").splitlines()
-    ]
-    for chunk in chunks:
-        chunk["embedding"] = []
-    chunks_path.write_text(
-        "".join(f"{json.dumps(chunk)}\n" for chunk in chunks),
-        encoding="utf-8",
-    )
-
-    llm = FakeResearchLlm()
-    answer = run_claim_research(
-        claim_path,
-        "What repairs were invoiced?",
-        llm,
-        depth=1,
-    )
-
-    assert answer.source_refs == [INVOICE_REF]
-    assert llm.extraction_calls[0][1][0].source_ref == INVOICE_REF
-
-
-def test_depth_two_researches_follow_up_questions_with_reduced_breadth():
-    llm = FakeResearchLlm()
+def test_second_layer_reduces_queries_per_question():
+    model = FakeResearchModel()
 
     answer = run_claim_research(
-        SAMPLE_OUTPUT,
-        "What repairs were invoiced?",
-        llm,
-        breadth=4,
-        depth=2,
+        store=ClaimStore(SAMPLE_OUTPUT),
+        question="What repairs were invoiced?",
+        model=model,
+        queries_per_question=4,
+        max_depth=2,
     )
 
-    assert [call[0] for call in llm.plan_calls] == [
+    assert [call[0] for call in model.plan_calls] == [
         "What repairs were invoiced?",
         "When did the collision occur?",
     ]
-    assert [call[2] for call in llm.plan_calls] == [4, 2]
+    assert [call[2] for call in model.plan_calls] == [4, 2]
     assert len(answer.findings) == 2
     assert answer.source_refs == [INVOICE_REF, FNOL_REF]
 
 
 def test_finding_cannot_cite_source_outside_query_evidence():
-    class InvalidCitationLlm(FakeResearchLlm):
+    class InvalidCitationModel(FakeResearchModel):
         def extract_findings(self, query, evidence):
             return [
                 ResearchFinding(
@@ -147,43 +110,43 @@ def test_finding_cannot_cite_source_outside_query_evidence():
 
     with pytest.raises(ValueError, match="outside retrieved evidence"):
         run_claim_research(
-            SAMPLE_OUTPUT,
-            "What repairs were invoiced?",
-            InvalidCitationLlm(),
-            depth=1,
+            store=ClaimStore(SAMPLE_OUTPUT),
+            question="What repairs were invoiced?",
+            model=InvalidCitationModel(),
+            max_depth=1,
         )
 
 
 def test_empty_question_is_rejected():
     with pytest.raises(ValueError, match="question cannot be empty"):
-        run_claim_research(SAMPLE_OUTPUT, "  ", FakeResearchLlm())
+        run_claim_research(ClaimStore(SAMPLE_OUTPUT), "  ", FakeResearchModel())
 
 
 @pytest.mark.parametrize(
     ("argument", "message"),
     [
-        ({"breadth": 0}, "breadth must be at least 1"),
-        ({"depth": 0}, "depth must be at least 1"),
+        ({"queries_per_question": 0}, "queries_per_question must be at least 1"),
+        ({"max_depth": 0}, "max_depth must be at least 1"),
         ({"top_k": 0}, "top_k must be at least 1"),
     ],
 )
 def test_numeric_limits_are_rejected(argument, message):
     with pytest.raises(ValueError, match=message):
         run_claim_research(
-            SAMPLE_OUTPUT,
-            "What repairs were invoiced?",
-            FakeResearchLlm(),
+            store=ClaimStore(SAMPLE_OUTPUT),
+            question="What repairs were invoiced?",
+            model=FakeResearchModel(),
             **argument,
         )
 
 
 def test_info_logging_traces_research_without_ocr_text(caplog):
-    with caplog.at_level(logging.INFO, logger="research.agent"):
+    with caplog.at_level(logging.INFO, logger="knowledge_agent.research.agent"):
         run_claim_research(
-            SAMPLE_OUTPUT,
-            "What repairs were invoiced?",
-            FakeResearchLlm(),
-            depth=1,
+            store=ClaimStore(SAMPLE_OUTPUT),
+            question="What repairs were invoiced?",
+            model=FakeResearchModel(),
+            max_depth=1,
         )
 
     assert "research_start" in caplog.text

@@ -26,12 +26,13 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["infrastructure*", "ingest*", "research*"]
+include = ["knowledge_agent*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
 markers = [
+    "live_api_key_ingestion: calls OpenRouter and Azure Document Intelligence",
     "live_openrouter: calls the configured live OpenRouter model",
     "live_azure: calls the configured live Azure AI Projects deployment",
 ]

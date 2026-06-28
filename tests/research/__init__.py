@@ -1,1 +1,1 @@
-"""Research agent tests."""
+"""Research tests."""

@@ -1,18 +1,35 @@
 import logging
 
-from research.cli import configure_logging
+from knowledge_agent.research.cli import build_parser, configure_logging
+
+
+def test_cli_uses_explicit_query_count_and_max_depth_names():
+    args = build_parser().parse_args(
+        [
+            "--claim-path",
+            "claim",
+            "--question",
+            "What happened?",
+            "--queries-per-question",
+            "3",
+            "--max-depth",
+            "2",
+        ]
+    )
+    assert args.queries_per_question == 3
+    assert args.max_depth == 2
 
 
 def test_cli_logging_creates_fixed_file_and_appends(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     try:
         configure_logging("INFO")
-        logging.getLogger("research.test").info("first run")
+        logging.getLogger("knowledge_agent.research.test").info("first run")
         for handler in logging.getLogger().handlers:
             handler.flush()
 
         configure_logging("INFO")
-        logging.getLogger("research.test").info("second run")
+        logging.getLogger("knowledge_agent.research.test").info("second run")
         for handler in logging.getLogger().handlers:
             handler.flush()
 

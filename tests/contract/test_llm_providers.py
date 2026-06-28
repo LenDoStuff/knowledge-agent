@@ -5,18 +5,16 @@ import pytest
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
-from infrastructure import (
-    LlmSettings,
-    PortableResponsesClient,
-    create_openai_runtime,
-)
-from research.agent import run_claim_research
-from research.llm import ResearchResponsesLlm
+from knowledge_agent.claims.store import ClaimStore
+from knowledge_agent.llm.client import open_responses_client
+from knowledge_agent.llm.config import LlmSettings
+from knowledge_agent.research.agent import run_claim_research
+from knowledge_agent.research.llm import ResponsesResearchModel
 
 
 load_dotenv()
 SAMPLE_OUTPUT = (
-    Path(__file__).parents[2] / "examples" / "ingest" / "sample_output"
+    Path(__file__).parents[2] / "examples" / "claims" / "sample_output"
 )
 GOLDEN_DATASET = Path(__file__).parents[2] / "evals" / "azure_research.json"
 
@@ -27,7 +25,7 @@ class CityAnswer(BaseModel):
 
 
 def assert_city_contract(settings: LlmSettings) -> None:
-    with PortableResponsesClient(settings, create_openai_runtime(settings)) as client:
+    with open_responses_client(settings) as client:
         result = client.parse(
             "Return the requested city and country.",
             "Give the capital of France and its country.",
@@ -52,11 +50,10 @@ def test_openrouter_structured_output_contract():
         )
     assert_city_contract(
         LlmSettings(
-            mode="home",
+            profile="api_key",
             model=model,
             reasoning_effort="medium",
             openrouter_api_key=api_key,
-            azure_ai_project_endpoint=None,
         )
     )
 
@@ -69,10 +66,9 @@ def azure_settings() -> LlmSettings:
             "AZURE_AI_PROJECT_ENDPOINT and AZURE_OPENAI_MODEL are required"
         )
     return LlmSettings(
-        mode="work",
+        profile="azure_project",
         model=model,
         reasoning_effort="medium",
-        openrouter_api_key=None,
         azure_ai_project_endpoint=endpoint,
     )
 
@@ -96,18 +92,16 @@ def test_azure_research_golden_dataset():
 
     cases = json.loads(GOLDEN_DATASET.read_text(encoding="utf-8"))
     settings = azure_settings()
-    with PortableResponsesClient(
-        settings,
-        create_openai_runtime(settings),
-    ) as client:
-        llm = ResearchResponsesLlm(client)
+    with open_responses_client(settings) as client:
+        model = ResponsesResearchModel(client)
+        store = ClaimStore(SAMPLE_OUTPUT)
         for case in cases:
             answer = run_claim_research(
-                SAMPLE_OUTPUT,
-                case["question"],
-                llm,
-                breadth=1,
-                depth=1,
+                store=store,
+                question=case["question"],
+                model=model,
+                queries_per_question=1,
+                max_depth=1,
                 top_k=2,
             )
             assert set(case["required_source_refs"]).issubset(answer.source_refs)

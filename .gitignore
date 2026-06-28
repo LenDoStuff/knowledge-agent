@@ -6,5 +6,6 @@ __pycache__/
 .env.*
 !.env.example
 data/claims/
+data/live-runs/
 logs/
 tmp/

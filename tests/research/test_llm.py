@@ -1,18 +1,18 @@
 from pathlib import Path
 import logging
 
-from ingest import ClaimKbKnowledgeStore
-from research.llm import (
+from knowledge_agent.claims.store import ClaimStore
+from knowledge_agent.research.llm import (
     FindingSet,
     QueryPlan,
-    ResearchResponsesLlm,
+    ResponsesResearchModel,
     WrittenAnswer,
 )
-from research.schemas import EvidenceItem, ResearchFinding, ResearchQuery
+from knowledge_agent.research.models import EvidenceItem, ResearchFinding, ResearchQuery
 
 
 SAMPLE_OUTPUT = (
-    Path(__file__).parents[2] / "examples" / "ingest" / "sample_output"
+    Path(__file__).parents[2] / "examples" / "claims" / "sample_output"
 )
 SOURCE_REF = "CLM-SAMPLE-001/DOC-002#DOC-002-CHUNK-001"
 
@@ -29,7 +29,7 @@ class FakeStructuredOutputClient:
 
 def build_llm(outputs):
     client = FakeStructuredOutputClient(outputs)
-    return ResearchResponsesLlm(client), client
+    return ResponsesResearchModel(client), client
 
 
 def test_research_llm_uses_structured_responses_for_all_steps():
@@ -48,7 +48,7 @@ def test_research_llm_uses_structured_responses_for_all_steps():
             WrittenAnswer(answer=f"A bumper cover was invoiced. [{SOURCE_REF}]"),
         ]
     )
-    documents = ClaimKbKnowledgeStore(SAMPLE_OUTPUT).manifest.documents
+    documents = ClaimStore(SAMPLE_OUTPUT).manifest.documents
     evidence = [
         EvidenceItem(
             document_id="DOC-002",
@@ -76,9 +76,9 @@ def test_debug_logging_contains_exact_prompt_and_parsed_output(caplog):
         research_goal="Identify invoiced repairs.",
     )
     llm, _ = build_llm([QueryPlan(queries=[query])])
-    documents = ClaimKbKnowledgeStore(SAMPLE_OUTPUT).manifest.documents
+    documents = ClaimStore(SAMPLE_OUTPUT).manifest.documents
 
-    with caplog.at_level(logging.DEBUG, logger="research.llm"):
+    with caplog.at_level(logging.DEBUG, logger="knowledge_agent.research.llm"):
         llm.plan_queries("What was repaired?", documents, 1)
 
     assert "research_llm_prompt operation=plan_queries" in caplog.text

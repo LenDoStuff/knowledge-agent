@@ -1,0 +1,26 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "PAID: Learn small API-key ingestion",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "scripts.debug_small_claim_ingestion",
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "env": {
+        "RUN_API_KEY_SMALL_INGESTION": "${input:paidRun}"
+      },
+      "console": "integratedTerminal",
+      "justMyCode": true
+    }
+  ],
+  "inputs": [
+    {
+      "id": "paidRun",
+      "type": "promptString",
+      "description": "Type 1 to enable this paid API run",
+      "default": "0"
+    }
+  ]
+}
