@@ -163,6 +163,11 @@ def test_extract_document_metadata_uses_responses_structured_parse():
     prompt_text = system + "\n" + user
     assert response_model is ExtractedDocumentMetadata
     assert "json" not in prompt_text.lower()
+    assert "summary of no more than 200 words" in prompt_text
+    assert (
+        response_model.model_json_schema()["properties"]["summary"]["description"]
+        == "A concise summary of no more than 200 words."
+    )
     assert metadata.id == "DOC-002"
     assert metadata.page_range == PageRange(start_page=2, end_page=2)
     assert metadata.file_name == "DOC-002_invoice.pdf"

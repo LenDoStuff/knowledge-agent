@@ -35,25 +35,26 @@ def assert_city_contract(settings: LlmSettings) -> None:
     assert result.country.casefold() == "france"
 
 
-@pytest.mark.live_openrouter
+@pytest.mark.live_nvidia
 @pytest.mark.skipif(
-    os.getenv("RUN_OPENROUTER_CONTRACT_TEST") != "1",
-    reason="set RUN_OPENROUTER_CONTRACT_TEST=1 to call OpenRouter",
+    os.getenv("RUN_NVIDIA_CONTRACT_TEST") != "1",
+    reason="set RUN_NVIDIA_CONTRACT_TEST=1 to call NVIDIA",
 )
-def test_openrouter_structured_output_contract():
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    model = os.getenv("OPENROUTER_MODEL")
-    if not api_key or not model:
+def test_nvidia_structured_output_contract():
+    api_key = os.getenv("nvidia_api_key_ds4")
+    base_url = os.getenv("nvidia_base_url")
+    if not api_key or not base_url:
         pytest.fail(
-            "OPENROUTER_API_KEY and OPENROUTER_MODEL are required for the "
+            "nvidia_api_key_ds4 and nvidia_base_url are required for the "
             "live contract test"
         )
     assert_city_contract(
         LlmSettings(
             profile="api_key",
-            model=model,
+            model="deepseek-ai/deepseek-v4-pro",
             reasoning_effort="medium",
-            openrouter_api_key=api_key,
+            nvidia_base_url=base_url,
+            nvidia_api_key_ds4=api_key,
         )
     )
 

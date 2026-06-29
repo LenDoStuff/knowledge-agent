@@ -1,4 +1,5 @@
 from pathlib import Path
+from threading import Barrier, Lock
 
 import pytest
 from pypdf import PdfReader
@@ -175,6 +176,46 @@ class ConflictingFolderClassifier(FolderClassifier):
     def extract_document_metadata(self, document, chunks):
         metadata = super().extract_document_metadata(document, chunks)
         return metadata.model_copy(update={"document_type": "policy"})
+
+
+class ConcurrentFolderOcrClient(FolderOcrClient):
+    def __init__(self, document_count: int) -> None:
+        super().__init__()
+        self.barrier = Barrier(document_count)
+        self.lock = Lock()
+        self.active = 0
+        self.max_active = 0
+
+    def extract_pages(self, claim_id: str, pdf_path: Path) -> list[PageText]:
+        with self.lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            self.barrier.wait(timeout=5)
+            return super().extract_pages(claim_id, pdf_path)
+        finally:
+            with self.lock:
+                self.active -= 1
+
+
+class ConcurrentMetadataClassifier(FakeClassifier):
+    def __init__(self, document_count: int) -> None:
+        super().__init__()
+        self.barrier = Barrier(document_count)
+        self.lock = Lock()
+        self.active = 0
+        self.max_active = 0
+
+    def extract_document_metadata(self, document, chunks):
+        with self.lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            self.barrier.wait(timeout=5)
+            return super().extract_document_metadata(document, chunks)
+        finally:
+            with self.lock:
+                self.active -= 1
 
 
 class FakeEmbedder:
@@ -390,6 +431,99 @@ def test_folder_ingestion_ocr_classifies_sorts_and_preserves_pdfs(tmp_path):
     assert sorted(ocr_client.calls) == sorted(payloads)
     assert len(classifier.classification_calls) == 3
     assert classifier.boundary_calls == []
+
+
+def test_folder_ingestion_processes_source_documents_concurrently(tmp_path):
+    input_path = tmp_path / "input"
+    input_path.mkdir()
+    names = ["a.pdf", "b.pdf", "c.pdf", "d.pdf"]
+    for name in names:
+        (input_path / name).write_bytes(name.encode())
+
+    ocr_client = ConcurrentFolderOcrClient(document_count=len(names))
+    services = IngestionServices(
+        ocr_client=ocr_client,
+        classifier=FolderClassifier({name: "invoice" for name in names}),
+        embedder=None,
+        vector_store_factory=None,
+        retrieval_mode="lexical",
+    )
+
+    manifest = ingest_claim_folder(
+        claim_id="CLM-CONCURRENT-SOURCES",
+        folder_path=input_path,
+        data_root=tmp_path / "claims",
+        services=services,
+    )
+
+    assert ocr_client.max_active == 4
+    assert [document.file_name for document in manifest.documents] == names
+
+
+def test_metadata_extraction_is_concurrent_and_keeps_document_order(
+    tmp_path,
+    sample_pdf,
+):
+    classifier = ConcurrentMetadataClassifier(document_count=2)
+    services = IngestionServices(
+        ocr_client=FakeOcrClient(),
+        classifier=classifier,
+        embedder=None,
+        vector_store_factory=None,
+        retrieval_mode="lexical",
+    )
+
+    manifest = ingest_claim_pdf(
+        claim_id="CLM-CONCURRENT-METADATA",
+        pdf_path=sample_pdf,
+        data_root=tmp_path / "claims",
+        services=services,
+    )
+
+    assert classifier.max_active == 2
+    assert [document.id for document in manifest.documents] == [
+        "DOC-001",
+        "DOC-002",
+    ]
+    assert [document.document_type for document in manifest.documents] == [
+        "fnol",
+        "invoice",
+    ]
+
+
+def test_folder_worker_failure_is_surfaced_and_logged(tmp_path):
+    input_path = tmp_path / "input"
+    input_path.mkdir()
+    for name in ["a.pdf", "b.pdf"]:
+        (input_path / name).write_bytes(name.encode())
+
+    class FailingOcrClient(FolderOcrClient):
+        def extract_pages(self, claim_id, pdf_path):
+            if pdf_path.name == "b.pdf":
+                raise RuntimeError("OCR worker failed")
+            return super().extract_pages(claim_id, pdf_path)
+
+    services = IngestionServices(
+        ocr_client=FailingOcrClient(),
+        classifier=FolderClassifier({"a.pdf": "fnol", "b.pdf": "invoice"}),
+        embedder=None,
+        vector_store_factory=None,
+        retrieval_mode="lexical",
+    )
+
+    with pytest.raises(RuntimeError, match="OCR worker failed"):
+        ingest_claim_folder(
+            claim_id="CLM-WORKER-FAILURE",
+            folder_path=input_path,
+            data_root=tmp_path / "claims",
+            services=services,
+        )
+
+    run_log = read_json(
+        tmp_path / "claims" / "CLM-WORKER-FAILURE" / "run_log.json"
+    )
+    assert run_log["entries"][-1]["step"] == "ocr_and_classify"
+    assert run_log["entries"][-1]["status"] == "failed"
 
 
 @pytest.mark.parametrize("input_kind", ["missing", "file", "empty"])

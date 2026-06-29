@@ -33,7 +33,7 @@ include = ["knowledge_agent*"]
 testpaths = ["tests"]
 pythonpath = ["."]
 markers = [
-    "live_api_key_ingestion: calls OpenRouter and Azure Document Intelligence",
-    "live_openrouter: calls the configured live OpenRouter model",
+    "live_api_key_ingestion: calls NVIDIA and Azure Document Intelligence",
+    "live_nvidia: calls NVIDIA DeepSeek V4 Pro",
     "live_azure: calls the configured live Azure AI Projects deployment",
 ]

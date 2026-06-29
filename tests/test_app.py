@@ -49,7 +49,8 @@ def llm_settings() -> LlmSettings:
         profile="api_key",
         model="test-model",
         reasoning_effort="low",
-        openrouter_api_key="test-key",
+        nvidia_base_url="https://integrate.api.nvidia.com/v1",
+        nvidia_api_key_ds4="test-key",
     )
 
 

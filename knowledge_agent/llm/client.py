@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from contextlib import contextmanager
 from time import perf_counter
@@ -67,7 +68,7 @@ class ResponsesClient:
             {"role": "user", "content": user},
         ]
         if self._settings.profile == "api_key":
-            return self._parse_openrouter(messages, response_model)
+            return self._parse_nvidia(messages, response_model)
 
         response = self._request(
             input=messages,
@@ -91,11 +92,15 @@ class ResponsesClient:
             )
         return parsed
 
-    def _parse_openrouter(
+    def _parse_nvidia(
         self,
         messages: list[dict[str, str]],
         response_model: type[ParsedModel],
     ) -> ParsedModel:
+        messages[0]["content"] += (
+            " Return JSON matching this JSON Schema: "
+            f"{json.dumps(response_model.model_json_schema())}"
+        )
         started = perf_counter()
         self._logger.info(
             "llm_request provider=%s model=%s api=chat_completions retry_count=0",
@@ -103,12 +108,11 @@ class ResponsesClient:
             self._settings.model,
         )
         try:
-            completion = self._client.chat.completions.parse(
+            completion = self._client.chat.completions.create(
                 model=self._settings.model,
                 messages=messages,
-                response_format=response_model,
                 temperature=0,
-                extra_body={"provider": {"require_parameters": True}},
+                extra_body={"response_mode": "json_object"},
             )
         except Exception as exc:
             error = self._normalize_error(exc)
@@ -151,8 +155,8 @@ class ResponsesClient:
                 request_id=request_id,
             )
         refusal = getattr(message, "refusal", None)
-        parsed = getattr(message, "parsed", None)
-        if parsed is None:
+        content = getattr(message, "content", None)
+        if not content:
             category = "refusal" if refusal else "output"
             raise LlmError(
                 f"Missing structured output for {response_model.__name__}",
@@ -160,14 +164,15 @@ class ResponsesClient:
                 category=category,
                 request_id=request_id,
             )
-        if not isinstance(parsed, response_model):
+        try:
+            return response_model.model_validate_json(content)
+        except ValidationError:
             raise LlmError(
                 f"Invalid structured output for {response_model.__name__}",
                 provider=self._settings.provider,
                 category="output",
                 request_id=request_id,
-            )
-        return parsed
+            ) from None
 
     def _request(self, **kwargs: Any) -> Any:
         request = {

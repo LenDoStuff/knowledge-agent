@@ -13,9 +13,6 @@ from openai import OpenAI
 from knowledge_agent.llm.config import LlmSettings
 
 
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-
-
 @dataclass(frozen=True)
 class ProviderClients:
     openai: Any
@@ -28,8 +25,8 @@ def open_provider_clients(settings: LlmSettings) -> Iterator[ProviderClients]:
     with ExitStack() as stack:
         if settings.profile == "api_key":
             client = OpenAI(
-                api_key=settings.openrouter_api_key,
-                base_url=OPENROUTER_BASE_URL,
+                api_key=settings.nvidia_api_key_ds4,
+                base_url=settings.nvidia_base_url,
                 max_retries=0,
             )
             stack.callback(client.close)

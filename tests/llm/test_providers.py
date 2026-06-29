@@ -2,18 +2,18 @@ from types import SimpleNamespace
 
 from knowledge_agent.llm.config import LlmSettings
 from knowledge_agent.llm.providers import (
-    OPENROUTER_BASE_URL,
     create_browser_credential,
     open_provider_clients,
 )
 
 
-def openrouter_settings() -> LlmSettings:
+def nvidia_settings() -> LlmSettings:
     return LlmSettings(
         profile="api_key",
-        model="provider/model",
+        model="deepseek-ai/deepseek-v4-pro",
         reasoning_effort="medium",
-        openrouter_api_key="secret-test-key",
+        nvidia_base_url="https://integrate.api.nvidia.com/v1",
+        nvidia_api_key_ds4="secret-test-key",
     )
 
 
@@ -46,7 +46,7 @@ def test_browser_credential_factory_is_explicit(monkeypatch):
     assert create_browser_credential() is credential
 
 
-def test_factory_builds_openrouter_client_and_closes_it(monkeypatch):
+def test_factory_builds_nvidia_client_and_closes_it(monkeypatch):
     calls = []
     client = FakeResource()
 
@@ -56,12 +56,12 @@ def test_factory_builds_openrouter_client_and_closes_it(monkeypatch):
 
     monkeypatch.setattr("knowledge_agent.llm.providers.OpenAI", build_client)
 
-    with open_provider_clients(openrouter_settings()) as provider:
+    with open_provider_clients(nvidia_settings()) as provider:
         assert provider.openai is client
     assert calls == [
         {
             "api_key": "secret-test-key",
-            "base_url": OPENROUTER_BASE_URL,
+            "base_url": "https://integrate.api.nvidia.com/v1",
             "max_retries": 0,
         }
     ]

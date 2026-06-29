@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import shutil
 import logging
+import shutil
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -31,6 +32,7 @@ from knowledge_agent.claims.filesystem import (
 from knowledge_agent.claims.ocr import OcrClient
 from knowledge_agent.claims.models import (
     ClaimManifest,
+    DocumentChunk,
     DocumentMetadata,
     PageRange,
     PageText,
@@ -43,6 +45,7 @@ from knowledge_agent.claims.vector_store import VectorStore
 
 
 LOGGER = logging.getLogger(__name__)
+_MAX_CONCURRENT_WORKERS = 4
 
 
 @dataclass
@@ -128,8 +131,7 @@ def ingest_claim_folder(
         pdf_paths = _collect_pdf_paths(folder_path)
 
     with log_step(log, "ocr_and_classify", root):
-        classified_documents = []
-        for pdf_path in pdf_paths:
+        def classify_source(pdf_path: Path) -> ClassifiedSourceDocument:
             pages = services.ocr_client.extract_pages(claim_id, pdf_path)
             if not pages:
                 raise ValueError(f"Document {pdf_path.name} has no OCR pages")
@@ -137,13 +139,14 @@ def ingest_claim_folder(
                 pdf_path.name,
                 pages,
             )
-            classified_documents.append(
-                ClassifiedSourceDocument(
-                    path=pdf_path,
-                    pages=pages,
-                    classification=classification,
-                )
+            return ClassifiedSourceDocument(
+                path=pdf_path,
+                pages=pages,
+                classification=classification,
             )
+
+        with ThreadPoolExecutor(max_workers=_MAX_CONCURRENT_WORKERS) as executor:
+            classified_documents = list(executor.map(classify_source, pdf_paths))
 
     classified_documents.sort(
         key=lambda item: (
@@ -255,8 +258,9 @@ def _complete_ingestion(
         chunks = chunk_documents(claim_id, logical_documents)
 
     with log_step(log, "metadata", root):
-        documents: list[DocumentMetadata] = []
-        for logical_document in logical_documents:
+        def extract_metadata(
+            logical_document: LogicalDocument,
+        ) -> tuple[DocumentMetadata, list[DocumentChunk]]:
             document_chunks = [
                 chunk
                 for chunk in chunks
@@ -280,6 +284,15 @@ def _complete_ingestion(
                 metadata = metadata.model_copy(
                     update={"document_type": logical_document.document_type}
                 )
+            return metadata, document_chunks
+
+        with ThreadPoolExecutor(max_workers=_MAX_CONCURRENT_WORKERS) as executor:
+            extracted_documents = list(
+                executor.map(extract_metadata, logical_documents)
+            )
+
+        documents: list[DocumentMetadata] = []
+        for metadata, document_chunks in extracted_documents:
             documents.append(metadata)
             for chunk in document_chunks:
                 chunk.document_type = metadata.document_type

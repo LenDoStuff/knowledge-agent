@@ -13,8 +13,9 @@ from knowledge_agent.config import (
 )
 
 
-LlmProvider = Literal["openrouter", "azure"]
+LlmProvider = Literal["nvidia", "azure"]
 ReasoningEffort = Literal["low", "medium", "high"]
+NVIDIA_DEEPSEEK_MODEL = "deepseek-ai/deepseek-v4-pro"
 
 
 @dataclass(frozen=True)
@@ -22,7 +23,8 @@ class LlmSettings:
     profile: DeploymentProfile
     model: str
     reasoning_effort: ReasoningEffort
-    openrouter_api_key: str | None = field(default=None, repr=False)
+    nvidia_base_url: str | None = None
+    nvidia_api_key_ds4: str | None = field(default=None, repr=False)
     azure_ai_project_endpoint: str | None = None
 
     @classmethod
@@ -36,9 +38,10 @@ class LlmSettings:
         if profile == "api_key":
             return cls(
                 profile=profile,
-                model=required_env("OPENROUTER_MODEL"),
+                model=NVIDIA_DEEPSEEK_MODEL,
                 reasoning_effort=cast(ReasoningEffort, reasoning_effort),
-                openrouter_api_key=required_env("OPENROUTER_API_KEY"),
+                nvidia_base_url=required_env("nvidia_base_url"),
+                nvidia_api_key_ds4=required_env("nvidia_api_key_ds4"),
             )
 
         return cls(
@@ -50,4 +53,4 @@ class LlmSettings:
 
     @property
     def provider(self) -> LlmProvider:
-        return "openrouter" if self.profile == "api_key" else "azure"
+        return "nvidia" if self.profile == "api_key" else "azure"

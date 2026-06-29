@@ -163,8 +163,8 @@ def _assert_live_output(
     debug_log = debug_log_path.read_text(encoding="utf-8")
     for expected_message in (
         "ocr_complete",
-        "llm_request provider=openrouter",
-        "llm_response provider=openrouter",
+        "llm_request provider=nvidia",
+        "llm_response provider=nvidia",
         "claim_classifier_prompt",
         "claim_classifier_output",
         "ingestion_step_complete",

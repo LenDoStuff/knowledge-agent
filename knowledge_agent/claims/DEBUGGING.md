@@ -1,7 +1,7 @@
 # Debugging the Small API-Key Ingestion
 
 This path is for learning the ingestion flow without stepping through pytest.
-It makes paid Azure Document Intelligence and OpenRouter requests for two
+It makes paid Azure Document Intelligence and NVIDIA requests for two
 two-page sample documents.
 
 ## Start the run

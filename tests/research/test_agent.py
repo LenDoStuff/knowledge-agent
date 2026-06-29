@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+from threading import Barrier, Lock, get_ident
 
 import pytest
 
@@ -171,6 +172,48 @@ def test_complete_gap_review_stops_without_another_search():
 
     assert len(model.review_calls) == 1
     assert len(answer.searches) == 1
+
+
+def test_research_queries_run_concurrently_and_commit_in_plan_order():
+    query_texts = ["alpha", "bravo", "charlie", "delta"]
+
+    class ConcurrentModel(FakeResearchModel):
+        def __init__(self):
+            super().__init__()
+            self.barrier = Barrier(len(query_texts))
+            self.lock = Lock()
+            self.worker_threads = set()
+
+        def plan_research(self, question, history, documents, query_count):
+            return ResearchPlan(
+                objectives=["Test concurrent research."],
+                queries=[
+                    ResearchQuery(query=value, research_goal=f"Search {value}.")
+                    for value in query_texts
+                ],
+            )
+
+        def extract_findings(self, query, evidence):
+            with self.lock:
+                self.worker_threads.add(get_ident())
+            self.barrier.wait(timeout=5)
+            return []
+
+    model = ConcurrentModel()
+    callback_threads = []
+    answer = run_claim_research(
+        ClaimStore(SAMPLE_OUTPUT),
+        "Run several searches.",
+        model,
+        max_depth=1,
+        on_step=lambda step: callback_threads.append(get_ident()),
+    )
+
+    assert len(model.worker_threads) == 4
+    assert get_ident() not in model.worker_threads
+    assert set(callback_threads) == {get_ident()}
+    assert [search.query.query for search in answer.searches] == query_texts
+    assert [step.query for step in answer.steps if step.stage == "tool"] == query_texts
 
 
 def test_duplicate_queries_and_findings_are_executed_once():

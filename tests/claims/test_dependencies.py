@@ -33,7 +33,8 @@ def api_key_llm_settings() -> LlmSettings:
         profile="api_key",
         model="provider/model",
         reasoning_effort="medium",
-        openrouter_api_key="secret-openrouter-key",
+        nvidia_base_url="https://integrate.api.nvidia.com/v1",
+        nvidia_api_key_ds4="secret-nvidia-key",
     )
 
 

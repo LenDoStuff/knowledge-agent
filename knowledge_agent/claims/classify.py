@@ -66,7 +66,7 @@ class DocumentClassifier(Protocol):
 
 class ExtractedDocumentMetadata(BaseModel):
     title: NonEmptyText
-    summary: Text
+    summary: Text = Field(description="A concise summary of no more than 200 words.")
     involved_parties: list[DocumentParty]
     events: list[DocumentEvent]
     document_type: NonEmptyText
@@ -164,9 +164,10 @@ class ResponsesDocumentClassifier:
                 "insurance claim files."
             ),
             user=(
-                "Extract a title, summary, involved parties, useful events, and "
-                "document type. Every event must use a provided chunk source_ref. "
-                "Keep the initial document type when it is not unknown.\n\n"
+                "Extract a title, summary of no more than 200 words, involved "
+                "parties, useful events, and document type. Every event must use "
+                "a provided chunk source_ref. Keep the initial document type when "
+                "it is not unknown.\n\n"
                 f"Document id: {document.id}\n"
                 f"Page range: {document.page_range.start_page}-"
                 f"{document.page_range.end_page}\n"

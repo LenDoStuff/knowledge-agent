@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Callable, Iterable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from knowledge_agent.claims.store import ClaimStore
@@ -24,6 +25,7 @@ from knowledge_agent.research.models import (
 
 LOGGER = logging.getLogger(__name__)
 SOURCE_CITATION = re.compile(r"\[([^\[\]\s]+/[^\[\]\s]+#[^\[\]\s]+)\]")
+_MAX_CONCURRENT_WORKERS = 4
 
 
 @dataclass
@@ -34,6 +36,13 @@ class ResearchState:
     steps: list[ResearchStep] = field(default_factory=list)
     evidence_by_ref: dict[str, EvidenceItem] = field(default_factory=dict)
     findings: list[ResearchFinding] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class _QueryResult:
+    query: ResearchQuery
+    evidence: list[EvidenceItem]
+    findings: list[ResearchFinding]
 
 
 def run_claim_research(
@@ -95,44 +104,59 @@ def run_claim_research(
             len(pending_queries),
             len(plan.objectives),
         )
+        layer_queries = []
         for query in pending_queries:
             query_key = query.query.casefold()
             if query_key in seen_queries:
                 continue
             seen_queries.add(query_key)
+            layer_queries.append(query)
+
+        def execute_query(query: ResearchQuery) -> _QueryResult:
             evidence = _search(store, query, top_k)
-            for item in evidence:
-                state.evidence_by_ref.setdefault(item.source_ref, item)
-            state.searches.append(
-                ResearchSearch(
-                    query=query,
-                    source_refs=[item.source_ref for item in evidence],
+            return _QueryResult(
+                query=query,
+                evidence=evidence,
+                findings=model.extract_findings(query, evidence),
+            )
+
+        with ThreadPoolExecutor(max_workers=_MAX_CONCURRENT_WORKERS) as executor:
+            query_results = executor.map(execute_query, layer_queries)
+            for result in query_results:
+                query = result.query
+                evidence = result.evidence
+                query_findings = result.findings
+                _validate_finding_sources(query_findings, evidence)
+                for item in evidence:
+                    state.evidence_by_ref.setdefault(item.source_ref, item)
+                state.searches.append(
+                    ResearchSearch(
+                        query=query,
+                        source_refs=[item.source_ref for item in evidence],
+                    )
                 )
-            )
-            _record_step(
-                state,
-                ResearchStep(
-                    stage="tool",
-                    message=(
-                        f"claim_search returned {len(evidence)} evidence chunks "
-                        f"for {query.query!r}."
+                _record_step(
+                    state,
+                    ResearchStep(
+                        stage="tool",
+                        message=(
+                            f"claim_search returned {len(evidence)} evidence chunks "
+                            f"for {query.query!r}."
+                        ),
+                        tool_name="claim_search",
+                        query=query.query,
+                        source_refs=[item.source_ref for item in evidence],
                     ),
-                    tool_name="claim_search",
-                    query=query.query,
-                    source_refs=[item.source_ref for item in evidence],
-                ),
-                on_step,
-            )
-            LOGGER.info(
-                "research_evidence layer=%d query=%r count=%d source_refs=%s",
-                layer_index + 1,
-                query.query,
-                len(evidence),
-                [item.source_ref for item in evidence],
-            )
-            query_findings = model.extract_findings(query, evidence)
-            _validate_finding_sources(query_findings, evidence)
-            state.findings.extend(query_findings)
+                    on_step,
+                )
+                LOGGER.info(
+                    "research_evidence layer=%d query=%r count=%d source_refs=%s",
+                    layer_index + 1,
+                    query.query,
+                    len(evidence),
+                    [item.source_ref for item in evidence],
+                )
+                state.findings.extend(query_findings)
 
         state.findings = _deduplicate_findings(state.findings)
         _record_step(

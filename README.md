@@ -21,7 +21,8 @@ research behavior.
 
 `KNOWLEDGE_AGENT_PROFILE` selects one explicit dependency bundle:
 
-- `api_key`: OpenRouter, API-key Document Intelligence, and lexical retrieval.
+- `api_key`: NVIDIA DeepSeek V4 Pro, API-key Document Intelligence, and lexical
+  retrieval.
 - `azure_project`: Azure AI Projects with browser authentication, a named
   Document Intelligence connection, Snowflake Cortex embeddings, and Chroma
   semantic retrieval.
@@ -84,7 +85,7 @@ through the UI. Existing claim IDs are not overwritten.
 python -m pytest
 ```
 
-Live provider contracts remain opt-in through `RUN_OPENROUTER_CONTRACT_TEST=1`
+Live provider contracts remain opt-in through `RUN_NVIDIA_CONTRACT_TEST=1`
 or `RUN_AZURE_CONTRACT_TEST=1`.
 
 ## Paid API-key ingestion runs
@@ -94,7 +95,7 @@ debug artifacts. They are skipped by normal `pytest` runs and require separate
 shell flags; do not add these flags to `.env`.
 
 The small run processes two two-page documents. It makes two Azure Document
-Intelligence requests and approximately four OpenRouter requests:
+Intelligence requests and approximately four NVIDIA requests:
 
 ```powershell
 $env:RUN_API_KEY_SMALL_INGESTION="1"
@@ -105,7 +106,7 @@ Remove-Item Env:RUN_API_KEY_SMALL_INGESTION
 
 The full run processes all fourteen sample documents and twenty-seven pages. It
 makes fourteen Document Intelligence requests and approximately twenty-eight
-OpenRouter requests:
+NVIDIA requests:
 
 ```powershell
 $env:RUN_API_KEY_FULL_INGESTION="1"
