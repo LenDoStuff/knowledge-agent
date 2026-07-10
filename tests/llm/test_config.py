@@ -1,7 +1,11 @@
 import pytest
 
 from knowledge_agent.config import ConfigurationError, load_profile
-from knowledge_agent.llm.config import NVIDIA_DEEPSEEK_MODEL, LlmSettings
+from knowledge_agent.llm.config import (
+    NVIDIA_DEEPSEEK_MODEL,
+    llm_provider,
+    load_llm_settings,
+)
 
 
 ENV_NAMES = [
@@ -33,9 +37,9 @@ def test_api_key_settings_load_without_exposing_secret(monkeypatch):
         },
     )
     profile = load_profile()
-    settings = LlmSettings.from_env(profile)
+    settings = load_llm_settings(profile)
     assert settings.profile == "api_key"
-    assert settings.provider == "nvidia"
+    assert llm_provider(settings) == "nvidia"
     assert settings.model == NVIDIA_DEEPSEEK_MODEL
     assert settings.reasoning_effort == "high"
     assert "secret-test-key" not in repr(settings)
@@ -50,9 +54,9 @@ def test_azure_project_settings_select_azure_model(monkeypatch):
             "AZURE_AI_PROJECT_ENDPOINT": "https://project.example",
         },
     )
-    settings = LlmSettings.from_env(load_profile())
+    settings = load_llm_settings(load_profile())
     assert settings.profile == "azure_project"
-    assert settings.provider == "azure"
+    assert llm_provider(settings) == "azure"
     assert settings.model == "deployment-name"
 
 
@@ -90,4 +94,4 @@ def test_invalid_configuration_fails_at_startup(monkeypatch, environment, messag
     set_environment(monkeypatch, environment)
     with pytest.raises(ConfigurationError, match=message):
         profile = load_profile()
-        LlmSettings.from_env(profile)
+        load_llm_settings(profile)

@@ -6,7 +6,7 @@ import openai
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from knowledge_agent.llm.client import LlmError, ResponsesClient
+from knowledge_agent.llm.client import LlmError, parse_structured_output
 from knowledge_agent.llm.config import LlmSettings
 
 
@@ -104,9 +104,8 @@ def test_nvidia_uses_json_mode_structured_output(caplog):
     raw_client, endpoint = fake_chat_client(
         completed_chat(Answer(city="Paris", country="France").model_dump_json())
     )
-    client = ResponsesClient(nvidia_settings(), raw_client)
     with caplog.at_level(logging.INFO):
-        result = client.parse("system", "user", Answer)
+        result = parse_structured_output(nvidia_settings(), raw_client, "system", "user", Answer)
 
     request = endpoint.calls[0]
     assert result == Answer(city="Paris", country="France")
@@ -128,8 +127,8 @@ def test_azure_uses_responses_structured_output():
         completed_response(Answer(city="Paris", country="France"))
     )
 
-    result = ResponsesClient(azure_settings(), raw_client).parse(
-        "system", "user", Answer
+    result = parse_structured_output(
+        azure_settings(), raw_client, "system", "user", Answer
     )
 
     assert result == Answer(city="Paris", country="France")
@@ -170,10 +169,11 @@ def test_provider_errors_are_normalized_without_secret_details(
     caplog, provider_error, category
 ):
     raw_client, _ = fake_chat_client(provider_error)
-    client = ResponsesClient(nvidia_settings(), raw_client)
     with caplog.at_level(logging.ERROR):
         with pytest.raises(LlmError) as raised:
-            client.parse("system", "user", Answer)
+            parse_structured_output(
+                nvidia_settings(), raw_client, "system", "user", Answer
+            )
     assert raised.value.category == category
     assert "secret-test-key" not in str(raised.value)
     assert "secret-test-key" not in caplog.text
@@ -184,25 +184,19 @@ def test_structured_validation_error_is_normalized():
         Answer.model_validate({"city": "Paris"})
     raw_client, _ = fake_chat_client(validation.value)
     with pytest.raises(LlmError) as raised:
-        ResponsesClient(nvidia_settings(), raw_client).parse(
-            "system", "user", Answer
-        )
+        parse_structured_output(nvidia_settings(), raw_client, "system", "user", Answer)
     assert raised.value.category == "output"
 
 
 def test_chat_incomplete_and_refusal_responses_are_explicit():
     raw_client, _ = fake_chat_client(completed_chat(finish_reason="length"))
     with pytest.raises(LlmError) as raised:
-        ResponsesClient(nvidia_settings(), raw_client).parse(
-            "system", "user", Answer
-        )
+        parse_structured_output(nvidia_settings(), raw_client, "system", "user", Answer)
     assert raised.value.category == "incomplete"
 
     raw_client, _ = fake_chat_client(completed_chat(refusal="Cannot comply"))
     with pytest.raises(LlmError) as raised:
-        ResponsesClient(nvidia_settings(), raw_client).parse(
-            "system", "user", Answer
-        )
+        parse_structured_output(nvidia_settings(), raw_client, "system", "user", Answer)
     assert raised.value.category == "refusal"
 
 
@@ -212,7 +206,7 @@ def test_responses_incomplete_and_refusal_responses_are_explicit():
     incomplete.incomplete_details = SimpleNamespace(reason="provider_limit")
     raw_client, _ = fake_responses_client(incomplete)
     with pytest.raises(LlmError) as raised:
-        ResponsesClient(azure_settings(), raw_client).parse("system", "user", Answer)
+        parse_structured_output(azure_settings(), raw_client, "system", "user", Answer)
     assert raised.value.category == "incomplete"
 
     refusal = completed_response()
@@ -223,5 +217,5 @@ def test_responses_incomplete_and_refusal_responses_are_explicit():
     ]
     raw_client, _ = fake_responses_client(refusal)
     with pytest.raises(LlmError) as raised:
-        ResponsesClient(azure_settings(), raw_client).parse("system", "user", Answer)
+        parse_structured_output(azure_settings(), raw_client, "system", "user", Answer)
     assert raised.value.category == "refusal"

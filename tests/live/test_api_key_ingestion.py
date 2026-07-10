@@ -10,12 +10,12 @@ from pathlib import Path
 import pytest
 
 from knowledge_agent.claims.cli import configure_logging
-from knowledge_agent.claims.config import ClaimSettings
+from knowledge_agent.claims.config import load_claim_settings
 from knowledge_agent.claims.dependencies import live_ingestion_services
 from knowledge_agent.claims.filesystem import read_jsonl
 from knowledge_agent.claims.pipeline import ingest_claim_folder
 from knowledge_agent.config import load_profile
-from knowledge_agent.llm.config import LlmSettings
+from knowledge_agent.llm.config import load_llm_settings
 
 
 pytestmark = pytest.mark.live_api_key_ingestion
@@ -93,8 +93,8 @@ def _run_live_ingestion(
         reject_semantic_dependency,
     )
 
-    claim_settings = replace(ClaimSettings.from_env(), data_root=LIVE_DATA_ROOT)
-    llm_settings = LlmSettings.from_env(profile)
+    claim_settings = replace(load_claim_settings(), data_root=LIVE_DATA_ROOT)
+    llm_settings = load_llm_settings(profile)
     configure_logging("DEBUG", debug_log_path)
     try:
         with live_ingestion_services(

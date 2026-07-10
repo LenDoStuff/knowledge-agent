@@ -15,10 +15,10 @@ from typing import Iterator
 from pydantic import BaseModel, Field
 
 from knowledge_agent.claims.chunking import chunk_documents
-from knowledge_agent.claims.classify import (
+from knowledge_agent.agents.document_classifier import (
     DocumentClassification,
-    DocumentClassifier,
     LogicalDocument,
+    PageBoundaryDecision,
 )
 from knowledge_agent.claims.embeddings import TextEmbedder
 from knowledge_agent.claims.filesystem import (
@@ -51,7 +51,15 @@ _MAX_CONCURRENT_WORKERS = 4
 @dataclass
 class IngestionServices:
     ocr_client: OcrClient
-    classifier: DocumentClassifier
+    classify_document: Callable[[str, list[PageText]], DocumentClassification]
+    classify_page_boundary: Callable[
+        [PageText, PageText | None, LogicalDocument | None],
+        PageBoundaryDecision,
+    ]
+    extract_document_metadata: Callable[
+        [LogicalDocument, list[DocumentChunk]],
+        DocumentMetadata,
+    ]
     embedder: TextEmbedder | None
     vector_store_factory: Callable[[Path], VectorStore] | None
     retrieval_mode: RetrievalMode
@@ -99,7 +107,7 @@ def ingest_claim_pdf(
         logical_documents = group_logical_documents(
             claim_id,
             pages,
-            services.classifier,
+            services.classify_page_boundary,
         )
         logical_documents = write_split_pdfs(
             original_pdf,
@@ -135,7 +143,7 @@ def ingest_claim_folder(
             pages = services.ocr_client.extract_pages(claim_id, pdf_path)
             if not pages:
                 raise ValueError(f"Document {pdf_path.name} has no OCR pages")
-            classification = services.classifier.classify_document(
+            classification = services.classify_document(
                 pdf_path.name,
                 pages,
             )
@@ -258,44 +266,12 @@ def _complete_ingestion(
         chunks = chunk_documents(claim_id, logical_documents)
 
     with log_step(log, "metadata", root):
-        def extract_metadata(
-            logical_document: LogicalDocument,
-        ) -> tuple[DocumentMetadata, list[DocumentChunk]]:
-            document_chunks = [
-                chunk
-                for chunk in chunks
-                if chunk.document_id == logical_document.id
-            ]
-            metadata = services.classifier.extract_document_metadata(
-                logical_document,
-                document_chunks,
-            )
-            if locked_document_types:
-                if (
-                    metadata.document_type.casefold()
-                    != logical_document.document_type.casefold()
-                ):
-                    raise ValueError(
-                        f"Document type changed after sorting for "
-                        f"{logical_document.id}: "
-                        f"{logical_document.document_type!r} -> "
-                        f"{metadata.document_type!r}"
-                    )
-                metadata = metadata.model_copy(
-                    update={"document_type": logical_document.document_type}
-                )
-            return metadata, document_chunks
-
-        with ThreadPoolExecutor(max_workers=_MAX_CONCURRENT_WORKERS) as executor:
-            extracted_documents = list(
-                executor.map(extract_metadata, logical_documents)
-            )
-
-        documents: list[DocumentMetadata] = []
-        for metadata, document_chunks in extracted_documents:
-            documents.append(metadata)
-            for chunk in document_chunks:
-                chunk.document_type = metadata.document_type
+        documents, chunks = _extract_documents(
+            logical_documents,
+            chunks,
+            services,
+            locked_document_types,
+        )
 
     embeddings: list[list[float]] = []
     if services.retrieval_mode == "semantic":
@@ -313,27 +289,108 @@ def _complete_ingestion(
         )
 
     if services.retrieval_mode == "semantic":
-        if services.vector_store_factory is None:
+        vector_store_factory = services.vector_store_factory
+        if vector_store_factory is None:
             raise ValueError("semantic retrieval requires a vector store factory")
         with log_step(log, "index", root):
-            vector_store: VectorStore = services.vector_store_factory(root)
-            try:
-                vector_store.index_chunks(chunks, embeddings)
-            finally:
-                vector_store.close()
+            _index_chunks(root, chunks, embeddings, vector_store_factory)
     else:
         with log_step(log, "clear_vector_index", root):
-            index_path = root / "index"
-            if index_path.exists():
-                shutil.rmtree(index_path)
+            _clear_vector_index(root)
 
+    manifest = _build_manifest(
+        claim_id,
+        root,
+        source_files,
+        documents,
+        len(chunks),
+        services,
+    )
+    with log_step(log, "claim_manifest", root):
+        write_claim_manifest(root, manifest)
+
+    log.finished_at = log.entries[-1].finished_at
+    write_json(root / "run_log.json", log.model_dump(mode="json"))
+    return manifest
+
+
+def _extract_documents(
+    logical_documents: list[LogicalDocument],
+    chunks: list[DocumentChunk],
+    services: IngestionServices,
+    locked_document_types: bool,
+) -> tuple[list[DocumentMetadata], list[DocumentChunk]]:
+    def extract_metadata(logical_document: LogicalDocument) -> DocumentMetadata:
+        document_chunks = [
+            chunk for chunk in chunks if chunk.document_id == logical_document.id
+        ]
+        metadata = services.extract_document_metadata(
+            logical_document,
+            document_chunks,
+        )
+        if not locked_document_types:
+            return metadata
+        if (
+            metadata.document_type.casefold()
+            != logical_document.document_type.casefold()
+        ):
+            raise ValueError(
+                f"Document type changed after sorting for {logical_document.id}: "
+                f"{logical_document.document_type!r} -> {metadata.document_type!r}"
+            )
+        return metadata.model_copy(
+            update={"document_type": logical_document.document_type}
+        )
+
+    with ThreadPoolExecutor(max_workers=_MAX_CONCURRENT_WORKERS) as executor:
+        documents = list(executor.map(extract_metadata, logical_documents))
+
+    document_types = {
+        document.id: document.document_type for document in documents
+    }
+    updated_chunks = [
+        chunk.model_copy(
+            update={"document_type": document_types[chunk.document_id]}
+        )
+        for chunk in chunks
+    ]
+    return documents, updated_chunks
+
+
+def _index_chunks(
+    root: Path,
+    chunks: list[DocumentChunk],
+    embeddings: list[list[float]],
+    vector_store_factory: Callable[[Path], VectorStore],
+) -> None:
+    vector_store = vector_store_factory(root)
+    try:
+        vector_store.index_chunks(chunks, embeddings)
+    finally:
+        vector_store.close()
+
+
+def _clear_vector_index(root: Path) -> None:
+    index_path = root / "index"
+    if index_path.exists():
+        shutil.rmtree(index_path)
+
+
+def _build_manifest(
+    claim_id: str,
+    root: Path,
+    source_files: list[Path],
+    documents: list[DocumentMetadata],
+    chunk_count: int,
+    services: IngestionServices,
+) -> ClaimManifest:
     embedder = services.embedder
     is_semantic = services.retrieval_mode == "semantic"
-    manifest = ClaimManifest(
+    return ClaimManifest(
         claim_id=claim_id,
         source_files=[path.relative_to(root).as_posix() for path in source_files],
         documents=documents,
-        chunk_count=len(chunks),
+        chunk_count=chunk_count,
         embedding_provider=(
             embedder.embedding_provider if is_semantic and embedder else None
         ),
@@ -342,12 +399,6 @@ def _complete_ingestion(
         ),
         retrieval_mode=services.retrieval_mode,
     )
-    with log_step(log, "claim_manifest", root):
-        write_claim_manifest(root, manifest)
-
-    log.finished_at = log.entries[-1].finished_at
-    write_json(root / "run_log.json", log.model_dump(mode="json"))
-    return manifest
 
 
 @contextmanager

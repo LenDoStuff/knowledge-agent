@@ -2,6 +2,9 @@
 
 The claims package owns the complete persisted claim boundary: OCR, logical
 document preparation, chunking, metadata extraction, indexing, and retrieval.
+LLM-assisted document classification lives in
+`knowledge_agent.agents.document_classifier` and is composed into ingestion
+through explicit services.
 
 ## Inputs and output
 
@@ -54,15 +57,15 @@ The composition context owns live clients:
 ```python
 from pathlib import Path
 
-from knowledge_agent.claims.config import ClaimSettings
+from knowledge_agent.claims.config import load_claim_settings
 from knowledge_agent.claims.dependencies import live_ingestion_services
 from knowledge_agent.claims.pipeline import ingest_claim_pdf
 from knowledge_agent.config import load_profile
-from knowledge_agent.llm.config import LlmSettings
+from knowledge_agent.llm.config import load_llm_settings
 
 profile = load_profile()
-claim_settings = ClaimSettings.from_env()
-llm_settings = LlmSettings.from_env(profile)
+claim_settings = load_claim_settings()
+llm_settings = load_llm_settings(profile)
 
 with live_ingestion_services("CLM-001", claim_settings, llm_settings) as services:
     manifest = ingest_claim_pdf(
@@ -76,13 +79,14 @@ with live_ingestion_services("CLM-001", claim_settings, llm_settings) as service
 Use the same store interface for both retrieval modes:
 
 ```python
-from knowledge_agent.claims.config import ClaimSettings
+from knowledge_agent.claims.config import load_claim_settings
 from knowledge_agent.claims.dependencies import open_claim_store
+from knowledge_agent.claims.store import get_document, get_page, search_claim
 
-with open_claim_store("data/claims/CLM-001", ClaimSettings.from_env()) as store:
-    results = store.search("repair invoice total", top_k=8)
-    document = store.get_document(results[0].document_id)
-    page = store.get_page(results[0].page_ids[0])
+with open_claim_store("data/claims/CLM-001", load_claim_settings()) as store:
+    results = search_claim(store, "repair invoice total", top_k=8)
+    document = get_document(store, results[0].document_id)
+    page = get_page(store, results[0].page_ids[0])
 ```
 
 Every result includes document metadata, page IDs, chunk text, score, and the

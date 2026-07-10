@@ -123,7 +123,7 @@ def test_manifest_requires_embedding_metadata_for_semantic_retrieval():
             "chunk_count": 0,
             "retrieval_mode": "semantic",
             "embedding_provider": "snowflake",
-            "embedding_model": "legacy-model",
+            "embedding_model": "test-embedding-model",
         }
     )
     assert manifest.retrieval_mode == "semantic"

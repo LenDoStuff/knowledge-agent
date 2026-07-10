@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from pypdf import PdfReader, PdfWriter
 
-from knowledge_agent.claims.classify import DocumentClassifier, LogicalDocument
+from knowledge_agent.agents.document_classifier import (
+    LogicalDocument,
+    PageBoundaryDecision,
+)
 from knowledge_agent.claims.models import PageRange, PageText
 from knowledge_agent.claims.filesystem import slugify
 
@@ -14,7 +18,10 @@ from knowledge_agent.claims.filesystem import slugify
 def group_logical_documents(
     claim_id: str,
     pages: list[PageText],
-    classifier: DocumentClassifier,
+    classify_page_boundary: Callable[
+        [PageText, PageText | None, LogicalDocument | None],
+        PageBoundaryDecision,
+    ],
 ) -> list[LogicalDocument]:
     sorted_pages = sorted(pages, key=lambda item: item.page_number)
     documents: list[LogicalDocument] = []
@@ -22,7 +29,7 @@ def group_logical_documents(
     prior_page: PageText | None = None
 
     for page in sorted_pages:
-        decision = classifier.classify_page_boundary(page, prior_page, current)
+        decision = classify_page_boundary(page, prior_page, current)
         is_new_document = current is None or decision.is_new_document
         if is_new_document:
             document_id = f"DOC-{len(documents) + 1:03d}"

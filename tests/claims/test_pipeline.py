@@ -5,7 +5,10 @@ import pytest
 from pypdf import PdfReader
 
 from knowledge_agent.claims.config import ClaimSettings
-from knowledge_agent.claims.classify import DocumentClassification, PageBoundaryDecision
+from knowledge_agent.agents.document_classifier import (
+    DocumentClassification,
+    PageBoundaryDecision,
+)
 from knowledge_agent.claims.pipeline import (
     IngestionServices,
     ingest_claim_folder,
@@ -52,6 +55,9 @@ class FakeOcrClient:
 class FakeClassifier:
     def __init__(self) -> None:
         self.boundary_calls = []
+
+    def classify_document(self, file_name, pages):
+        raise AssertionError("combined ingestion must not classify whole PDFs")
 
     def classify_page_boundary(self, page, prior_page, current_document):
         self.boundary_calls.append((page.page_number, prior_page, current_document))
@@ -242,6 +248,25 @@ class FakeVectorStore:
         pass
 
 
+def ingestion_services(
+    *,
+    ocr_client,
+    classifier,
+    embedder,
+    vector_store_factory,
+    retrieval_mode,
+) -> IngestionServices:
+    return IngestionServices(
+        ocr_client=ocr_client,
+        classify_document=classifier.classify_document,
+        classify_page_boundary=classifier.classify_page_boundary,
+        extract_document_metadata=classifier.extract_document_metadata,
+        embedder=embedder,
+        vector_store_factory=vector_store_factory,
+        retrieval_mode=retrieval_mode,
+    )
+
+
 def test_ingestion_pipeline_creates_expected_outputs(tmp_path, sample_pdf):
     settings = ClaimSettings(
         data_root=tmp_path / "claims",
@@ -251,7 +276,7 @@ def test_ingestion_pipeline_creates_expected_outputs(tmp_path, sample_pdf):
     )
     classifier = FakeClassifier()
     vector_store = FakeVectorStore()
-    services = IngestionServices(
+    services = ingestion_services(
         ocr_client=FakeOcrClient(),
         classifier=classifier,
         embedder=FakeEmbedder(),
@@ -322,7 +347,7 @@ def test_lexical_ingestion_skips_embeddings_and_clears_index(
     stale_index = data_root / "CLM-KEYWORD" / "index" / "chroma"
     stale_index.mkdir(parents=True)
     (stale_index / "stale.bin").write_bytes(b"stale")
-    services = IngestionServices(
+    services = ingestion_services(
         ocr_client=FakeOcrClient(),
         classifier=FakeClassifier(),
         embedder=None,
@@ -376,7 +401,7 @@ def test_folder_ingestion_ocr_classifies_sorts_and_preserves_pdfs(tmp_path):
         }
     )
     vector_store = FakeVectorStore()
-    services = IngestionServices(
+    services = ingestion_services(
         ocr_client=ocr_client,
         classifier=classifier,
         embedder=FakeEmbedder(),
@@ -441,7 +466,7 @@ def test_folder_ingestion_processes_source_documents_concurrently(tmp_path):
         (input_path / name).write_bytes(name.encode())
 
     ocr_client = ConcurrentFolderOcrClient(document_count=len(names))
-    services = IngestionServices(
+    services = ingestion_services(
         ocr_client=ocr_client,
         classifier=FolderClassifier({name: "invoice" for name in names}),
         embedder=None,
@@ -465,7 +490,7 @@ def test_metadata_extraction_is_concurrent_and_keeps_document_order(
     sample_pdf,
 ):
     classifier = ConcurrentMetadataClassifier(document_count=2)
-    services = IngestionServices(
+    services = ingestion_services(
         ocr_client=FakeOcrClient(),
         classifier=classifier,
         embedder=None,
@@ -503,7 +528,7 @@ def test_folder_worker_failure_is_surfaced_and_logged(tmp_path):
                 raise RuntimeError("OCR worker failed")
             return super().extract_pages(claim_id, pdf_path)
 
-    services = IngestionServices(
+    services = ingestion_services(
         ocr_client=FailingOcrClient(),
         classifier=FolderClassifier({"a.pdf": "fnol", "b.pdf": "invoice"}),
         embedder=None,
@@ -536,7 +561,7 @@ def test_folder_ingestion_rejects_invalid_inputs(
         folder_path.write_text("not a folder", encoding="utf-8")
     elif input_kind == "empty":
         folder_path.mkdir()
-    services = IngestionServices(
+    services = ingestion_services(
         ocr_client=FolderOcrClient(),
         classifier=FolderClassifier({}),
         embedder=FakeEmbedder(),
@@ -563,7 +588,7 @@ def test_folder_ingestion_rejects_document_type_changes(tmp_path):
     folder_path = tmp_path / "input"
     folder_path.mkdir()
     (folder_path / "invoice.pdf").write_bytes(b"invoice")
-    services = IngestionServices(
+    services = ingestion_services(
         ocr_client=FolderOcrClient(),
         classifier=ConflictingFolderClassifier({"invoice.pdf": "invoice"}),
         embedder=FakeEmbedder(),

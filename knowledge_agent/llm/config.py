@@ -27,30 +27,28 @@ class LlmSettings:
     nvidia_api_key_ds4: str | None = field(default=None, repr=False)
     azure_ai_project_endpoint: str | None = None
 
-    @classmethod
-    def from_env(cls, profile: DeploymentProfile) -> "LlmSettings":
-        reasoning_effort = os.getenv("LLM_REASONING_EFFORT", "medium").strip().lower()
-        if reasoning_effort not in {"low", "medium", "high"}:
-            raise ConfigurationError(
-                "LLM_REASONING_EFFORT must be low, medium, or high"
-            )
 
-        if profile == "api_key":
-            return cls(
-                profile=profile,
-                model=NVIDIA_DEEPSEEK_MODEL,
-                reasoning_effort=cast(ReasoningEffort, reasoning_effort),
-                nvidia_base_url=required_env("nvidia_base_url"),
-                nvidia_api_key_ds4=required_env("nvidia_api_key_ds4"),
-            )
+def load_llm_settings(profile: DeploymentProfile) -> LlmSettings:
+    reasoning_effort = os.getenv("LLM_REASONING_EFFORT", "medium").strip().lower()
+    if reasoning_effort not in {"low", "medium", "high"}:
+        raise ConfigurationError("LLM_REASONING_EFFORT must be low, medium, or high")
 
-        return cls(
+    if profile == "api_key":
+        return LlmSettings(
             profile=profile,
-            model=required_env("AZURE_OPENAI_MODEL"),
+            model=NVIDIA_DEEPSEEK_MODEL,
             reasoning_effort=cast(ReasoningEffort, reasoning_effort),
-            azure_ai_project_endpoint=required_env("AZURE_AI_PROJECT_ENDPOINT"),
+            nvidia_base_url=required_env("nvidia_base_url"),
+            nvidia_api_key_ds4=required_env("nvidia_api_key_ds4"),
         )
 
-    @property
-    def provider(self) -> LlmProvider:
-        return "nvidia" if self.profile == "api_key" else "azure"
+    return LlmSettings(
+        profile=profile,
+        model=required_env("AZURE_OPENAI_MODEL"),
+        reasoning_effort=cast(ReasoningEffort, reasoning_effort),
+        azure_ai_project_endpoint=required_env("AZURE_AI_PROJECT_ENDPOINT"),
+    )
+
+
+def llm_provider(settings: LlmSettings) -> LlmProvider:
+    return "nvidia" if settings.profile == "api_key" else "azure"

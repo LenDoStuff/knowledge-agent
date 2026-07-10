@@ -1,21 +1,23 @@
-"""Structured output client for the configured model provider."""
+"""Structured output parsing for the configured model provider."""
 
 from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from contextlib import contextmanager
 from time import perf_counter
-from typing import Any, Iterator, Protocol, TypeVar
+from typing import Any, Iterator, TypeVar
 
 import openai
 from pydantic import BaseModel, ValidationError
 
-from knowledge_agent.llm.config import LlmSettings
+from knowledge_agent.llm.config import LlmSettings, llm_provider
 from knowledge_agent.llm.providers import open_provider_clients
 
 
 ParsedModel = TypeVar("ParsedModel", bound=BaseModel)
+StructuredOutputParser = Callable[[str, str, type[ParsedModel]], ParsedModel]
 LOGGER = logging.getLogger(__name__)
 
 
@@ -36,231 +38,235 @@ class LlmError(Exception):
         self.status_code = status_code
 
 
-class StructuredOutputClient(Protocol):
-    def parse(
-        self,
-        system: str,
-        user: str,
-        response_model: type[ParsedModel],
-    ) -> ParsedModel:
-        ...
+def parse_structured_output(
+    settings: LlmSettings,
+    client: Any,
+    system: str,
+    user: str,
+    response_model: type[ParsedModel],
+    logger: logging.Logger = LOGGER,
+) -> ParsedModel:
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    if settings.profile == "api_key":
+        return _parse_nvidia(settings, client, messages, response_model, logger)
 
-
-class ResponsesClient:
-    def __init__(
-        self,
-        settings: LlmSettings,
-        client: Any,
-        logger: logging.Logger = LOGGER,
-    ) -> None:
-        self._settings = settings
-        self._client = client
-        self._logger = logger
-
-    def parse(
-        self,
-        system: str,
-        user: str,
-        response_model: type[ParsedModel],
-    ) -> ParsedModel:
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ]
-        if self._settings.profile == "api_key":
-            return self._parse_nvidia(messages, response_model)
-
-        response = self._request(
-            input=messages,
-            text_format=response_model,
-        )
-        parsed = getattr(response, "output_parsed", None)
-        if parsed is None:
-            category = "refusal" if _find_refusal(response) is not None else "output"
-            raise LlmError(
-                f"Missing structured output for {response_model.__name__}",
-                provider=self._settings.provider,
-                category=category,
-                request_id=_request_id(response),
-            )
-        if not isinstance(parsed, response_model):
-            raise LlmError(
-                f"Invalid structured output for {response_model.__name__}",
-                provider=self._settings.provider,
-                category="output",
-                request_id=_request_id(response),
-            )
-        return parsed
-
-    def _parse_nvidia(
-        self,
-        messages: list[dict[str, str]],
-        response_model: type[ParsedModel],
-    ) -> ParsedModel:
-        messages[0]["content"] += (
-            " Return JSON matching this JSON Schema: "
-            f"{json.dumps(response_model.model_json_schema())}"
-        )
-        started = perf_counter()
-        self._logger.info(
-            "llm_request provider=%s model=%s api=chat_completions retry_count=0",
-            self._settings.provider,
-            self._settings.model,
-        )
-        try:
-            completion = self._client.chat.completions.create(
-                model=self._settings.model,
-                messages=messages,
-                temperature=0,
-                extra_body={"response_mode": "json_object"},
-            )
-        except Exception as exc:
-            error = self._normalize_error(exc)
-            self._logger.error(
-                "llm_error provider=%s model=%s api=chat_completions "
-                "category=%s request_id=%s status_code=%s latency_ms=%d "
-                "retry_count=0",
-                self._settings.provider,
-                self._settings.model,
-                error.category,
-                error.request_id,
-                error.status_code,
-                round((perf_counter() - started) * 1000),
-            )
-            raise error from None
-
-        request_id = _request_id(completion)
-        choice = completion.choices[0] if completion.choices else None
-        message = getattr(choice, "message", None)
-        finish_reason = getattr(choice, "finish_reason", None)
-        usage = _chat_usage(completion)
-        self._logger.info(
-            "llm_response provider=%s model=%s api=chat_completions "
-            "request_id=%s finish_reason=%s input_tokens=%s output_tokens=%s "
-            "reasoning_tokens=%s latency_ms=%d retry_count=0",
-            self._settings.provider,
-            self._settings.model,
-            request_id,
-            finish_reason,
-            usage["input_tokens"],
-            usage["output_tokens"],
-            usage["reasoning_tokens"],
-            round((perf_counter() - started) * 1000),
-        )
-        if finish_reason == "length":
-            raise LlmError(
-                "The response was incomplete: output token limit",
-                provider=self._settings.provider,
-                category="incomplete",
-                request_id=request_id,
-            )
-        refusal = getattr(message, "refusal", None)
-        content = getattr(message, "content", None)
-        if not content:
-            category = "refusal" if refusal else "output"
-            raise LlmError(
-                f"Missing structured output for {response_model.__name__}",
-                provider=self._settings.provider,
-                category=category,
-                request_id=request_id,
-            )
-        try:
-            return response_model.model_validate_json(content)
-        except ValidationError:
-            raise LlmError(
-                f"Invalid structured output for {response_model.__name__}",
-                provider=self._settings.provider,
-                category="output",
-                request_id=request_id,
-            ) from None
-
-    def _request(self, **kwargs: Any) -> Any:
-        request = {
-            "model": self._settings.model,
-            "reasoning": {"effort": self._settings.reasoning_effort},
-            **kwargs,
-        }
-        started = perf_counter()
-        self._logger.info(
-            "llm_request provider=%s model=%s retry_count=0",
-            self._settings.provider,
-            self._settings.model,
-        )
-        try:
-            response = self._client.responses.parse(**request)
-        except Exception as exc:
-            error = self._normalize_error(exc)
-            self._logger.error(
-                "llm_error provider=%s model=%s category=%s request_id=%s "
-                "status_code=%s latency_ms=%d retry_count=0",
-                self._settings.provider,
-                self._settings.model,
-                error.category,
-                error.request_id,
-                error.status_code,
-                round((perf_counter() - started) * 1000),
-            )
-            raise error from None
-
-        request_id = _request_id(response)
-        status = getattr(response, "status", None)
-        incomplete_reason = _incomplete_reason(response)
-        usage = _usage(response)
-        self._logger.info(
-            "llm_response provider=%s model=%s request_id=%s status=%s "
-            "incomplete_reason=%s input_tokens=%s output_tokens=%s "
-            "reasoning_tokens=%s latency_ms=%d retry_count=0",
-            self._settings.provider,
-            self._settings.model,
-            request_id,
-            status,
-            incomplete_reason,
-            usage["input_tokens"],
-            usage["output_tokens"],
-            usage["reasoning_tokens"],
-            round((perf_counter() - started) * 1000),
-        )
-        if status == "incomplete":
-            raise LlmError(
-                f"The response was incomplete: {incomplete_reason or 'unknown'}",
-                provider=self._settings.provider,
-                category="incomplete",
-                request_id=request_id,
-            )
-        return response
-
-    def _normalize_error(self, exc: Exception) -> LlmError:
-        if isinstance(exc, LlmError):
-            return exc
-        category = "provider"
-        if isinstance(exc, (openai.AuthenticationError, openai.PermissionDeniedError)):
-            category = "authentication"
-        elif isinstance(exc, openai.RateLimitError):
-            category = "rate_limit"
-        elif isinstance(exc, openai.APITimeoutError):
-            category = "timeout"
-        elif isinstance(exc, openai.APIConnectionError):
-            category = "connection"
-        elif isinstance(
-            exc,
-            (openai.BadRequestError, openai.NotFoundError, openai.UnprocessableEntityError),
-        ):
-            category = "unsupported_request"
-        elif isinstance(exc, (ValidationError, openai.APIResponseValidationError)):
-            category = "output"
-        return LlmError(
-            "The LLM request failed",
-            provider=self._settings.provider,
+    response = _request_responses(
+        settings,
+        client,
+        logger,
+        input=messages,
+        text_format=response_model,
+    )
+    parsed = getattr(response, "output_parsed", None)
+    if parsed is None:
+        category = "refusal" if _find_refusal(response) is not None else "output"
+        raise LlmError(
+            f"Missing structured output for {response_model.__name__}",
+            provider=llm_provider(settings),
             category=category,
-            request_id=getattr(exc, "request_id", None),
-            status_code=getattr(exc, "status_code", None),
+            request_id=_request_id(response),
         )
+    if not isinstance(parsed, response_model):
+        raise LlmError(
+            f"Invalid structured output for {response_model.__name__}",
+            provider=llm_provider(settings),
+            category="output",
+            request_id=_request_id(response),
+        )
+    return parsed
 
 
 @contextmanager
-def open_responses_client(settings: LlmSettings) -> Iterator[ResponsesClient]:
+def open_structured_output_parser(
+    settings: LlmSettings,
+) -> Iterator[StructuredOutputParser]:
     with open_provider_clients(settings) as provider:
-        yield ResponsesClient(settings, provider.openai)
+        yield lambda system, user, response_model: parse_structured_output(
+            settings,
+            provider.openai,
+            system,
+            user,
+            response_model,
+        )
+
+
+def _parse_nvidia(
+    settings: LlmSettings,
+    client: Any,
+    messages: list[dict[str, str]],
+    response_model: type[ParsedModel],
+    logger: logging.Logger,
+) -> ParsedModel:
+    messages[0]["content"] += (
+        " Return JSON matching this JSON Schema: "
+        f"{json.dumps(response_model.model_json_schema())}"
+    )
+    started = perf_counter()
+    provider = llm_provider(settings)
+    logger.info(
+        "llm_request provider=%s model=%s api=chat_completions retry_count=0",
+        provider,
+        settings.model,
+    )
+    try:
+        completion = client.chat.completions.create(
+            model=settings.model,
+            messages=messages,
+            temperature=0,
+            extra_body={"response_mode": "json_object"},
+        )
+    except Exception as exc:
+        error = normalize_llm_error(settings, exc)
+        logger.error(
+            "llm_error provider=%s model=%s api=chat_completions "
+            "category=%s request_id=%s status_code=%s latency_ms=%d "
+            "retry_count=0",
+            provider,
+            settings.model,
+            error.category,
+            error.request_id,
+            error.status_code,
+            round((perf_counter() - started) * 1000),
+        )
+        raise error from None
+
+    request_id = _request_id(completion)
+    choice = completion.choices[0] if completion.choices else None
+    message = getattr(choice, "message", None)
+    finish_reason = getattr(choice, "finish_reason", None)
+    usage = _chat_usage(completion)
+    logger.info(
+        "llm_response provider=%s model=%s api=chat_completions "
+        "request_id=%s finish_reason=%s input_tokens=%s output_tokens=%s "
+        "reasoning_tokens=%s latency_ms=%d retry_count=0",
+        provider,
+        settings.model,
+        request_id,
+        finish_reason,
+        usage["input_tokens"],
+        usage["output_tokens"],
+        usage["reasoning_tokens"],
+        round((perf_counter() - started) * 1000),
+    )
+    if finish_reason == "length":
+        raise LlmError(
+            "The response was incomplete: output token limit",
+            provider=provider,
+            category="incomplete",
+            request_id=request_id,
+        )
+    refusal = getattr(message, "refusal", None)
+    content = getattr(message, "content", None)
+    if not content:
+        category = "refusal" if refusal else "output"
+        raise LlmError(
+            f"Missing structured output for {response_model.__name__}",
+            provider=provider,
+            category=category,
+            request_id=request_id,
+        )
+    try:
+        return response_model.model_validate_json(content)
+    except ValidationError:
+        raise LlmError(
+            f"Invalid structured output for {response_model.__name__}",
+            provider=provider,
+            category="output",
+            request_id=request_id,
+        ) from None
+
+
+def _request_responses(
+    settings: LlmSettings,
+    client: Any,
+    logger: logging.Logger,
+    **kwargs: Any,
+) -> Any:
+    request = {
+        "model": settings.model,
+        "reasoning": {"effort": settings.reasoning_effort},
+        **kwargs,
+    }
+    started = perf_counter()
+    provider = llm_provider(settings)
+    logger.info(
+        "llm_request provider=%s model=%s retry_count=0",
+        provider,
+        settings.model,
+    )
+    try:
+        response = client.responses.parse(**request)
+    except Exception as exc:
+        error = normalize_llm_error(settings, exc)
+        logger.error(
+            "llm_error provider=%s model=%s category=%s request_id=%s "
+            "status_code=%s latency_ms=%d retry_count=0",
+            provider,
+            settings.model,
+            error.category,
+            error.request_id,
+            error.status_code,
+            round((perf_counter() - started) * 1000),
+        )
+        raise error from None
+
+    request_id = _request_id(response)
+    status = getattr(response, "status", None)
+    incomplete_reason = _incomplete_reason(response)
+    usage = _usage(response)
+    logger.info(
+        "llm_response provider=%s model=%s request_id=%s status=%s "
+        "incomplete_reason=%s input_tokens=%s output_tokens=%s "
+        "reasoning_tokens=%s latency_ms=%d retry_count=0",
+        provider,
+        settings.model,
+        request_id,
+        status,
+        incomplete_reason,
+        usage["input_tokens"],
+        usage["output_tokens"],
+        usage["reasoning_tokens"],
+        round((perf_counter() - started) * 1000),
+    )
+    if status == "incomplete":
+        raise LlmError(
+            f"The response was incomplete: {incomplete_reason or 'unknown'}",
+            provider=provider,
+            category="incomplete",
+            request_id=request_id,
+        )
+    return response
+
+
+def normalize_llm_error(settings: LlmSettings, exc: Exception) -> LlmError:
+    if isinstance(exc, LlmError):
+        return exc
+    category = "provider"
+    if isinstance(exc, (openai.AuthenticationError, openai.PermissionDeniedError)):
+        category = "authentication"
+    elif isinstance(exc, openai.RateLimitError):
+        category = "rate_limit"
+    elif isinstance(exc, openai.APITimeoutError):
+        category = "timeout"
+    elif isinstance(exc, openai.APIConnectionError):
+        category = "connection"
+    elif isinstance(
+        exc,
+        (openai.BadRequestError, openai.NotFoundError, openai.UnprocessableEntityError),
+    ):
+        category = "unsupported_request"
+    elif isinstance(exc, (ValidationError, openai.APIResponseValidationError)):
+        category = "output"
+    return LlmError(
+        "The LLM request failed",
+        provider=llm_provider(settings),
+        category=category,
+        request_id=getattr(exc, "request_id", None),
+        status_code=getattr(exc, "status_code", None),
+    )
 
 
 def _request_id(response: Any) -> str | None:

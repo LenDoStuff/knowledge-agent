@@ -1,7 +1,12 @@
 from pathlib import Path
 import shutil
 
-from knowledge_agent.claims.store import ClaimStore
+from knowledge_agent.claims.store import (
+    get_document,
+    get_page,
+    load_claim_store,
+    search_claim,
+)
 from knowledge_agent.claims.models import ClaimSearchResult, DocumentChunk
 from knowledge_agent.claims.filesystem import read_jsonl
 from knowledge_agent.claims.vector_store import ChromaVectorStore, VectorSearchHit
@@ -27,11 +32,11 @@ def test_sample_output_has_stable_citation_fields():
 
 
 def test_knowledge_store_loads_searches_and_reads_sample_output():
-    store = ClaimStore(SAMPLE_OUTPUT)
+    store = load_claim_store(SAMPLE_OUTPUT)
 
-    result = store.search("synthetic collision fnol", top_k=1)[0]
-    document = store.get_document("DOC-001")
-    page = store.get_page("CLM-SAMPLE-001:p1")
+    result = search_claim(store, "synthetic collision fnol", top_k=1)[0]
+    document = get_document(store, "DOC-001")
+    page = get_page(store, "CLM-SAMPLE-001:p1")
 
     assert isinstance(result, ClaimSearchResult)
     assert result.chunk_id == "DOC-001-CHUNK-001"
@@ -51,7 +56,7 @@ def test_knowledge_store_loads_searches_and_reads_sample_output():
 
 
 def test_knowledge_store_exposes_ordered_pages_and_chunks_for_inspection():
-    store = ClaimStore(SAMPLE_OUTPUT)
+    store = load_claim_store(SAMPLE_OUTPUT)
 
     assert [page.page_id for page in store.pages] == [
         "CLM-SAMPLE-001:p1",
@@ -64,12 +69,12 @@ def test_knowledge_store_exposes_ordered_pages_and_chunks_for_inspection():
 
 
 def test_knowledge_store_searches_document_metadata():
-    store = ClaimStore(SAMPLE_OUTPUT)
+    store = load_claim_store(SAMPLE_OUTPUT)
 
-    assert store.search("synthetic invoice listing", top_k=1)[0].document_id == (
+    assert search_claim(store, "synthetic invoice listing", top_k=1)[0].document_id == (
         "DOC-002"
     )
-    assert store.search("invoice", top_k=1)[0].document_type == "invoice"
+    assert search_claim(store, "invoice", top_k=1)[0].document_type == "invoice"
 
 
 def test_semantic_store_returns_the_same_citation_rich_result_shape(tmp_path):
@@ -104,12 +109,12 @@ def test_semantic_store_returns_the_same_citation_rich_result_shape(tmp_path):
         '"retrieval_mode": "semantic",\n  "embedding_provider": "snowflake",\n  "embedding_model": "test-model"',
     )
     manifest_path.write_text(semantic, encoding="utf-8")
-    store = ClaimStore(
+    store = load_claim_store(
         claim_path,
         embedder=FakeEmbedder(),
         vector_store=FakeVectorStore(),
     )
-    result = store.search("repair", top_k=1)[0]
+    result = search_claim(store, "repair", top_k=1)[0]
     assert result.chunk_id == "DOC-002-CHUNK-001"
     assert result.source_ref.endswith("#DOC-002-CHUNK-001")
     assert result.page_ids == ["CLM-SAMPLE-001:p2"]
@@ -142,12 +147,12 @@ def test_semantic_store_queries_a_real_chroma_index(tmp_path):
     vector_store = ChromaVectorStore("CLM-SAMPLE-001", claim_path / "index/chroma")
     try:
         vector_store.index_chunks(chunks, [[1.0, 0.0], [0.0, 1.0]])
-        store = ClaimStore(
+        store = load_claim_store(
             claim_path,
             embedder=FakeEmbedder(),
             vector_store=vector_store,
         )
-        result = store.search("repair", top_k=1)[0]
+        result = search_claim(store, "repair", top_k=1)[0]
     finally:
         vector_store.close()
 

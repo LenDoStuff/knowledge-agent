@@ -4,6 +4,8 @@ import pytest
 
 from knowledge_agent.claims.config import (
     ClaimSettings,
+    load_claim_settings,
+    require_ingestion_settings,
     validate_document_intelligence_endpoint,
 )
 from knowledge_agent.config import ConfigurationError
@@ -28,13 +30,18 @@ def test_api_key_profile_requires_endpoint_and_api_key():
         document_intelligence_api_key="secret-test-key",
     )
 
-    configured.require_ingestion("api_key")
+    require_ingestion_settings(configured, "api_key")
     assert "secret-test-key" not in repr(configured)
 
     with pytest.raises(ConfigurationError, match="API_KEY"):
-        settings(
-            document_intelligence_endpoint="https://example.cognitiveservices.azure.com"
-        ).require_ingestion("api_key")
+        require_ingestion_settings(
+            settings(
+                document_intelligence_endpoint=(
+                    "https://example.cognitiveservices.azure.com"
+                )
+            ),
+            "api_key",
+        )
 
 
 def test_azure_project_profile_requires_connection_and_snowflake():
@@ -42,16 +49,19 @@ def test_azure_project_profile_requires_connection_and_snowflake():
         document_intelligence_connection_name="document-intelligence",
     )
 
-    configured.require_ingestion("azure_project")
+    require_ingestion_settings(configured, "azure_project")
 
     with pytest.raises(ConfigurationError, match="CONNECTION_NAME"):
-        settings().require_ingestion("azure_project")
+        require_ingestion_settings(settings(), "azure_project")
 
     with pytest.raises(ConfigurationError, match="SNOWFLAKE_CONNECTION_NAME"):
-        settings(
-            document_intelligence_connection_name="document-intelligence",
-            snowflake_connection_name="",
-        ).require_ingestion("azure_project")
+        require_ingestion_settings(
+            settings(
+                document_intelligence_connection_name="document-intelligence",
+                snowflake_connection_name="",
+            ),
+            "azure_project",
+        )
 
 
 def test_azure_project_endpoint_rejects_regional_endpoint():
@@ -82,7 +92,7 @@ def test_settings_load_mode_specific_document_intelligence_values(monkeypatch):
         "document-intelligence",
     )
 
-    configured = ClaimSettings.from_env()
+    configured = load_claim_settings()
 
     assert configured.document_intelligence_api_key == "secret-test-key"
     assert configured.document_intelligence_connection_name == "document-intelligence"

@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager
+from functools import partial
 from pathlib import Path
 from typing import Iterator, cast
 
 from azure.core.credentials import AzureKeyCredential
 
-from knowledge_agent.claims.classify import ResponsesDocumentClassifier
+from knowledge_agent.agents.document_classifier import (
+    classify_document,
+    classify_page_boundary,
+    extract_document_metadata,
+)
 from knowledge_agent.claims.config import (
     ClaimSettings,
+    require_ingestion_settings,
+    require_semantic_retrieval_settings,
     validate_document_intelligence_endpoint,
 )
 from knowledge_agent.claims.embeddings import SnowflakeAiEmbedder
@@ -18,10 +25,10 @@ from knowledge_agent.claims.filesystem import read_json
 from knowledge_agent.claims.models import ClaimManifest
 from knowledge_agent.claims.ocr import AzureDocumentIntelligenceOcrClient
 from knowledge_agent.claims.pipeline import IngestionServices
-from knowledge_agent.claims.store import ClaimStore
+from knowledge_agent.claims.store import ClaimStore, load_claim_store
 from knowledge_agent.claims.vector_store import ChromaVectorStore
 from knowledge_agent.config import ConfigurationError
-from knowledge_agent.llm.client import ResponsesClient
+from knowledge_agent.llm.client import parse_structured_output
 from knowledge_agent.llm.config import LlmSettings
 from knowledge_agent.llm.providers import open_provider_clients
 
@@ -32,9 +39,9 @@ def live_ingestion_services(
     settings: ClaimSettings,
     llm_settings: LlmSettings,
 ) -> Iterator[IngestionServices]:
-    settings.require_ingestion(llm_settings.profile)
+    require_ingestion_settings(settings, llm_settings.profile)
     with open_provider_clients(llm_settings) as provider, ExitStack() as resources:
-        responses = ResponsesClient(llm_settings, provider.openai)
+        parse = partial(parse_structured_output, llm_settings, provider.openai)
         embedder = None
         vector_store_factory = None
 
@@ -78,7 +85,9 @@ def live_ingestion_services(
         resources.callback(ocr_client.close)
         yield IngestionServices(
             ocr_client=ocr_client,
-            classifier=ResponsesDocumentClassifier(responses),
+            classify_document=partial(classify_document, parse),
+            classify_page_boundary=partial(classify_page_boundary, parse),
+            extract_document_metadata=partial(extract_document_metadata, parse),
             embedder=embedder,
             vector_store_factory=vector_store_factory,
             retrieval_mode=retrieval_mode,
@@ -96,10 +105,10 @@ def open_claim_store(
         raise ValueError("manifest.json must contain a JSON object")
     manifest = ClaimManifest.model_validate(manifest_data)
     if manifest.retrieval_mode == "lexical":
-        yield ClaimStore(claim_path)
+        yield load_claim_store(claim_path)
         return
 
-    settings.require_semantic_retrieval()
+    require_semantic_retrieval_settings(settings)
     if manifest.embedding_provider != "snowflake" or not manifest.embedding_model:
         raise ConfigurationError(
             "Only Snowflake embeddings are supported for semantic claims"
@@ -115,7 +124,7 @@ def open_claim_store(
             claim_path / "index" / "chroma",
         )
         resources.callback(vector_store.close)
-        yield ClaimStore(
+        yield load_claim_store(
             claim_path,
             embedder=embedder,
             vector_store=vector_store,

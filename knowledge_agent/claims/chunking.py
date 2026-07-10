@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from knowledge_agent.claims.classify import LogicalDocument
+from knowledge_agent.agents.document_classifier import LogicalDocument
 from knowledge_agent.claims.models import (
     DocumentChunk,
     PageRange,

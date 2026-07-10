@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from knowledge_agent.research.models import (
+from knowledge_agent.agents.claim_researcher.models import (
     ChatMessage,
     DraftAnswer,
     EvidenceItem,
@@ -82,10 +82,10 @@ def test_draft_answer_allows_no_sources_for_insufficient_evidence():
     assert draft.source_refs == []
 
 
-def test_draft_answer_normalizes_bracketed_source_references():
+def test_draft_answer_keeps_bracketed_source_references_exact():
     draft = DraftAnswer(
         answer=f"A supported answer. [{SOURCE_REF}]",
         source_refs=[f"[{SOURCE_REF}]"],
     )
 
-    assert draft.source_refs == [SOURCE_REF]
+    assert draft.source_refs == [f"[{SOURCE_REF}]"]

@@ -8,7 +8,6 @@ from pydantic import (
     BaseModel,
     Field,
     StringConstraints,
-    field_validator,
     model_validator,
 )
 
@@ -73,22 +72,6 @@ class ResearchStep(BaseModel):
 class DraftAnswer(BaseModel):
     answer: NonEmptyText
     source_refs: list[NonEmptyText] = Field(default_factory=list)
-
-    @field_validator("source_refs", mode="before")
-    @classmethod
-    def remove_citation_brackets(cls, values: object) -> object:
-        if not isinstance(values, list):
-            return values
-        return [
-            value.strip()[1:-1]
-            if (
-                isinstance(value, str)
-                and value.strip().startswith("[")
-                and value.strip().endswith("]")
-            )
-            else value
-            for value in values
-        ]
 
 
 class ResearchAnswer(BaseModel):

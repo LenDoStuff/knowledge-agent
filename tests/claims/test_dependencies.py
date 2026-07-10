@@ -9,6 +9,7 @@ from azure.core.credentials import AzureKeyCredential
 
 from knowledge_agent.claims.config import ClaimSettings
 from knowledge_agent.claims.dependencies import live_ingestion_services, open_claim_store
+from knowledge_agent.claims.store import search_claim
 from knowledge_agent.config import ConfigurationError
 from knowledge_agent.llm.config import LlmSettings
 from knowledge_agent.llm.providers import ProviderClients
@@ -91,6 +92,9 @@ def test_api_key_profile_builds_key_ocr_without_semantic_dependencies(monkeypatc
         api_key_llm_settings(),
     ) as services:
         assert services.retrieval_mode == "lexical"
+        assert callable(services.classify_document)
+        assert callable(services.classify_page_boundary)
+        assert callable(services.extract_document_metadata)
         assert services.embedder is None
         assert services.vector_store_factory is None
         assert isinstance(ocr_calls[0][1], AzureKeyCredential)
@@ -136,6 +140,9 @@ def test_azure_project_profile_builds_snowflake_and_chroma(monkeypatch):
         azure_llm_settings(),
     ) as services:
         assert services.retrieval_mode == "semantic"
+        assert callable(services.classify_document)
+        assert callable(services.classify_page_boundary)
+        assert callable(services.extract_document_metadata)
         assert services.embedder is embedder
         assert callable(services.vector_store_factory)
 
@@ -208,7 +215,9 @@ def test_semantic_claim_store_uses_manifest_model_and_closes_resources(
     )
 
     with open_claim_store(claim_path, claim_settings()) as store:
-        assert store.search("repair", top_k=1)[0].chunk_id == "DOC-002-CHUNK-001"
+        assert search_claim(store, "repair", top_k=1)[0].chunk_id == (
+            "DOC-002-CHUNK-001"
+        )
 
     assert created == [("default", "stored-model")]
     assert embedder.closed

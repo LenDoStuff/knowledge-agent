@@ -1,11 +1,13 @@
 import logging
 
-from knowledge_agent.claims.classify import (
+from knowledge_agent.agents.document_classifier import (
     DocumentClassification,
     ExtractedDocumentMetadata,
     LogicalDocument,
     PageBoundaryDecision,
-    ResponsesDocumentClassifier,
+    classify_document,
+    classify_page_boundary,
+    extract_document_metadata,
 )
 from knowledge_agent.claims.models import (
     DocumentChunk,
@@ -14,23 +16,19 @@ from knowledge_agent.claims.models import (
 )
 
 
-class FakeStructuredOutputClient:
-    def __init__(self, parsed_outputs):
-        self.parsed_outputs = list(parsed_outputs)
-        self.calls = []
+def build_parser(parsed_outputs):
+    queued_outputs = list(parsed_outputs)
+    calls = []
 
-    def parse(self, system, user, response_model):
-        self.calls.append((system, user, response_model))
-        return self.parsed_outputs.pop(0)
+    def parse(system, user, response_model):
+        calls.append((system, user, response_model))
+        return queued_outputs.pop(0)
 
-
-def build_classifier(parsed_outputs):
-    client = FakeStructuredOutputClient(parsed_outputs)
-    return ResponsesDocumentClassifier(client), client
+    return parse, calls
 
 
 def test_classify_complete_document_uses_responses_structured_parse(caplog):
-    classifier, client = build_classifier(
+    parse, calls = build_parser(
         [
             DocumentClassification(
                 title="Repair Invoice",
@@ -39,8 +37,12 @@ def test_classify_complete_document_uses_responses_structured_parse(caplog):
         ]
     )
 
-    with caplog.at_level(logging.DEBUG, logger="knowledge_agent.claims.classify"):
-        result = classifier.classify_document(
+    with caplog.at_level(
+        logging.DEBUG,
+        logger="knowledge_agent.agents.document_classifier.model",
+    ):
+        result = classify_document(
+            parse,
             "repair_invoice.pdf",
             [
                 PageText(
@@ -52,7 +54,7 @@ def test_classify_complete_document_uses_responses_structured_parse(caplog):
             ],
         )
 
-    system, user, response_model = client.calls[0]
+    system, user, response_model = calls[0]
     assert response_model is DocumentClassification
     assert "repair_invoice.pdf" in user
     assert "Repair Invoice" in user
@@ -64,7 +66,7 @@ def test_classify_complete_document_uses_responses_structured_parse(caplog):
 
 
 def test_classify_page_boundary_uses_responses_structured_parse():
-    classifier, client = build_classifier(
+    parse, calls = build_parser(
         [
             PageBoundaryDecision(
                 page_number=999,
@@ -75,7 +77,8 @@ def test_classify_page_boundary_uses_responses_structured_parse():
         ]
     )
 
-    decision = classifier.classify_page_boundary(
+    decision = classify_page_boundary(
+        parse,
         page=PageText(
             claim_id="CLM-001",
             page_number=2,
@@ -97,7 +100,7 @@ def test_classify_page_boundary_uses_responses_structured_parse():
         ),
     )
 
-    system, user, response_model = client.calls[0]
+    system, user, response_model = calls[0]
     prompt_text = system + "\n" + user
     assert response_model is PageBoundaryDecision
     assert "json" not in prompt_text.lower()
@@ -106,7 +109,7 @@ def test_classify_page_boundary_uses_responses_structured_parse():
 
 
 def test_extract_document_metadata_uses_responses_structured_parse():
-    classifier, client = build_classifier(
+    parse, calls = build_parser(
         [
             ExtractedDocumentMetadata(
                 title="Repair Invoice",
@@ -157,9 +160,9 @@ def test_extract_document_metadata_uses_responses_structured_parse():
         )
     ]
 
-    metadata = classifier.extract_document_metadata(document, chunks)
+    metadata = extract_document_metadata(parse, document, chunks)
 
-    system, user, response_model = client.calls[0]
+    system, user, response_model = calls[0]
     prompt_text = system + "\n" + user
     assert response_model is ExtractedDocumentMetadata
     assert "json" not in prompt_text.lower()

@@ -6,13 +6,12 @@ import argparse
 import logging
 from pathlib import Path
 
-from knowledge_agent.claims.config import ClaimSettings
+from knowledge_agent.claims.config import load_claim_settings
 from knowledge_agent.claims.dependencies import open_claim_store
 from knowledge_agent.config import load_profile
-from knowledge_agent.llm.client import open_responses_client
-from knowledge_agent.llm.config import LlmSettings
-from knowledge_agent.research.agent import run_claim_research
-from knowledge_agent.research.llm import ResponsesResearchModel
+from knowledge_agent.llm.client import open_structured_output_parser
+from knowledge_agent.llm.config import load_llm_settings
+from knowledge_agent.agents.claim_researcher import run_claim_research
 
 
 LOG_PATH = Path("logs") / "research.log"
@@ -40,16 +39,16 @@ def main() -> None:
     args = build_parser().parse_args()
     configure_logging(args.log_level)
     profile = load_profile()
-    llm_settings = LlmSettings.from_env(profile)
-    claim_settings = ClaimSettings.from_env()
+    llm_settings = load_llm_settings(profile)
+    claim_settings = load_claim_settings()
     with (
-        open_responses_client(llm_settings) as responses,
+        open_structured_output_parser(llm_settings) as parse_structured_output,
         open_claim_store(args.claim_path, claim_settings) as store,
     ):
         answer = run_claim_research(
             store=store,
             question=args.question,
-            model=ResponsesResearchModel(responses),
+            parse_structured_output=parse_structured_output,
             queries_per_question=args.queries_per_question,
             max_depth=args.max_depth,
             top_k=args.top_k,

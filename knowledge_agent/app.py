@@ -13,21 +13,25 @@ from typing import Literal, Protocol, Sequence
 import streamlit as st
 from dotenv import load_dotenv
 
-from knowledge_agent.claims.config import ClaimSettings
+from knowledge_agent.claims.config import ClaimSettings, load_claim_settings
 from knowledge_agent.claims.dependencies import (
     live_ingestion_services,
     open_claim_store,
 )
+from knowledge_agent.claims.errors import ChunkNotFoundError
 from knowledge_agent.claims.filesystem import claim_root, read_json, safe_claim_id
-from knowledge_agent.claims.models import ClaimManifest, DocumentChunk
+from knowledge_agent.claims.models import ClaimManifest, DocumentChunk, DocumentMetadata
 from knowledge_agent.claims.pipeline import ingest_claim_folder, ingest_claim_pdf
-from knowledge_agent.claims.store import ClaimStore
+from knowledge_agent.claims.store import ClaimStore, get_document, get_page, load_claim_store
 from knowledge_agent.config import load_profile
-from knowledge_agent.llm.client import open_responses_client
-from knowledge_agent.llm.config import LlmSettings
-from knowledge_agent.research.agent import run_claim_research
-from knowledge_agent.research.llm import ResponsesResearchModel
-from knowledge_agent.research.models import ChatMessage, ResearchAnswer, ResearchStep
+from knowledge_agent.llm.client import open_structured_output_parser
+from knowledge_agent.llm.config import LlmSettings, load_llm_settings
+from knowledge_agent.agents.claim_researcher import (
+    ChatMessage,
+    ResearchAnswer,
+    ResearchStep,
+    run_claim_research,
+)
 
 
 UploadMode = Literal["combined", "separate"]
@@ -180,7 +184,7 @@ def main() -> None:
     st.title("Claim Research Workbench")
     st.caption("Ingest claim PDFs, inspect their evidence, and ask cited questions.")
 
-    claim_settings = ClaimSettings.from_env()
+    claim_settings = load_claim_settings()
     claims, invalid_claims = discover_claims(claim_settings.data_root)
     selected = _render_sidebar(claim_settings, claims, invalid_claims)
     notice = st.session_state.pop("claim_notice", None)
@@ -192,7 +196,7 @@ def main() -> None:
         return
 
     try:
-        store = ClaimStore(selected.path)
+        store = load_claim_store(selected.path)
     except Exception as exc:
         st.error(f"Could not open claim {selected.manifest.claim_id}: {exc}")
         return
@@ -263,7 +267,7 @@ def _render_ingestion_form(claim_settings: ClaimSettings) -> None:
 
     try:
         profile = load_profile()
-        llm_settings = LlmSettings.from_env(profile)
+        llm_settings = load_llm_settings(profile)
         validate_uploads(mode, upload_list)
         with st.status("Ingesting claim…", expanded=True) as status:
             st.write("Running OCR, document classification, chunking, and indexing.")
@@ -288,6 +292,19 @@ def _render_ingestion_form(claim_settings: ClaimSettings) -> None:
 
 
 def _render_knowledge_base(store: ClaimStore) -> None:
+    _render_claim_metrics(store)
+    if not store.documents:
+        st.info("This claim has no documents.")
+        return
+
+    _render_claim_overview(store)
+    document = _select_document(store)
+    _render_document_metadata(document)
+    _render_document_chunks(store, document.id)
+    _render_document_pages(store, document)
+
+
+def _render_claim_metrics(store: ClaimStore) -> None:
     manifest = store.manifest
     columns = st.columns(4)
     columns[0].metric("Claim", manifest.claim_id)
@@ -295,10 +312,8 @@ def _render_knowledge_base(store: ClaimStore) -> None:
     columns[2].metric("Chunks", manifest.chunk_count)
     columns[3].metric("Retrieval", manifest.retrieval_mode)
 
-    if not store.documents:
-        st.info("This claim has no documents.")
-        return
 
+def _render_claim_overview(store: ClaimStore) -> None:
     st.subheader("Claim overview")
     timeline_tab, parties_tab = st.tabs(["Timeline", "Parties"])
     with timeline_tab:
@@ -310,6 +325,8 @@ def _render_knowledge_base(store: ClaimStore) -> None:
         else:
             st.caption("No parties were extracted from this claim.")
 
+
+def _select_document(store: ClaimStore) -> DocumentMetadata:
     st.subheader("Documents")
     st.dataframe(
         [
@@ -332,10 +349,13 @@ def _render_knowledge_base(store: ClaimStore) -> None:
         "Inspect document",
         [document.id for document in store.documents],
         format_func=lambda document_id: (
-            f"{document_id} — {store.get_document(document_id).title}"
+            f"{document_id} — {get_document(store, document_id).title}"
         ),
     )
-    document = store.get_document(selected_document_id)
+    return get_document(store, selected_document_id)
+
+
+def _render_document_metadata(document: DocumentMetadata) -> None:
     st.markdown(f"**{document.title}**  \n{document.summary}")
 
     parties_column, events_column = st.columns(2)
@@ -360,10 +380,12 @@ def _render_knowledge_base(store: ClaimStore) -> None:
         else:
             st.caption("No events extracted.")
 
+
+def _render_document_chunks(store: ClaimStore, document_id: str) -> None:
     st.subheader("Evidence chunks")
     filter_text = st.text_input("Filter chunks", placeholder="Search text or source reference")
     document_chunks = [
-        chunk for chunk in store.chunks if chunk.document_id == selected_document_id
+        chunk for chunk in store.chunks if chunk.document_id == document_id
     ]
     if filter_text.strip():
         needle = filter_text.casefold()
@@ -394,6 +416,11 @@ def _render_knowledge_base(store: ClaimStore) -> None:
         selected_chunk = _chunk_by_ref(document_chunks, selected_ref)
         st.code(selected_chunk.text, language=None, wrap_lines=True)
 
+
+def _render_document_pages(
+    store: ClaimStore,
+    document: DocumentMetadata,
+) -> None:
     st.subheader("OCR pages")
     pages = [
         page
@@ -403,7 +430,7 @@ def _render_knowledge_base(store: ClaimStore) -> None:
         <= document.page_range.end_page
     ]
     selected_page_id = st.selectbox("Page text", [page.page_id for page in pages])
-    st.code(store.get_page(selected_page_id).text, language=None, wrap_lines=True)
+    st.code(get_page(store, selected_page_id).text, language=None, wrap_lines=True)
 
 
 def _render_chat(
@@ -421,14 +448,7 @@ def _render_chat(
         histories[claim_id] = []
         st.rerun()
 
-    for message in messages:
-        with st.chat_message(message["role"]):
-            if message["role"] == "assistant" and "research" in message:
-                answer = ResearchAnswer.model_validate(message["research"])
-                _render_cited_answer(answer, local_store)
-                _render_research_details(answer, local_store)
-            else:
-                st.markdown(message["content"])
+    _render_chat_history(messages, local_store)
 
     prompt = st.chat_input("Ask a question about this claim")
     if not prompt:
@@ -450,7 +470,7 @@ def _render_chat(
 
     try:
         profile = load_profile()
-        llm_settings = LlmSettings.from_env(profile)
+        llm_settings = load_llm_settings(profile)
         with st.chat_message("assistant"):
             with st.status("Researching the claim…", expanded=True) as status:
                 st.write("Planning searches, gathering evidence, and checking gaps.")
@@ -459,13 +479,13 @@ def _render_chat(
                     status.write(step.message)
 
                 with (
-                    open_responses_client(llm_settings) as responses,
+                    open_structured_output_parser(llm_settings) as parse_structured_output,
                     open_claim_store(entry.path, claim_settings) as store,
                 ):
                     answer = run_claim_research(
                         store=store,
                         question=prompt,
-                        model=ResponsesResearchModel(responses),
+                        parse_structured_output=parse_structured_output,
                         history=history,
                         on_step=show_step,
                     )
@@ -486,6 +506,24 @@ def _render_chat(
     st.rerun()
 
 
+def _render_chat_history(
+    messages: Sequence[dict[str, object]],
+    store: ClaimStore,
+) -> None:
+    for message in messages:
+        role = str(message["role"])
+        with st.chat_message(role):
+            if message["role"] == "assistant" and "research" in message:
+                try:
+                    answer = ResearchAnswer.model_validate(message["research"])
+                    _render_cited_answer(answer, store)
+                    _render_research_details(answer, store)
+                except Exception as exc:
+                    st.error(f"Could not display saved research answer: {exc}")
+            else:
+                st.markdown(str(message["content"]))
+
+
 def _render_cited_answer(answer: ResearchAnswer, store: ClaimStore) -> None:
     st.markdown(
         _cited_answer_html(answer.answer, answer.source_refs, store),
@@ -497,11 +535,8 @@ def _render_research_details(answer: ResearchAnswer, store: ClaimStore) -> None:
     if answer.source_refs:
         with st.expander(f"Sources ({len(answer.source_refs)})"):
             for index, source_ref in enumerate(answer.source_refs, start=1):
-                chunk = _chunk_for_source(store, source_ref)
-                if chunk is None:
-                    st.code(f"[{index}] {source_ref}", language=None)
-                    continue
-                document = store.get_document(chunk.document_id)
+                chunk = _require_chunk_for_source(store, source_ref)
+                document = get_document(store, chunk.document_id)
                 st.markdown(f"**[{index}] {document.title}**")
                 st.caption(
                     f"{source_ref} · pages {', '.join(chunk.page_ids)}"
@@ -639,18 +674,18 @@ def _cited_answer_html(
     source_refs: list[str],
     store: ClaimStore,
 ) -> str:
+    citations = [
+        (index, source_ref, _require_chunk_for_source(store, source_ref))
+        for index, source_ref in enumerate(source_refs, start=1)
+    ]
     rendered = html.escape(answer).replace("\n", "<br>")
-    for index, source_ref in enumerate(source_refs, start=1):
-        chunk = _chunk_for_source(store, source_ref)
-        if chunk is None:
-            tooltip = source_ref
-        else:
-            document = store.get_document(chunk.document_id)
-            tooltip = (
-                f"{source_ref} · {document.title} · "
-                f"pages {', '.join(chunk.page_ids)} · "
-                f"{_excerpt(chunk.text, 240)}"
-            )
+    for index, source_ref, chunk in citations:
+        document = get_document(store, chunk.document_id)
+        tooltip = (
+            f"{source_ref} · {document.title} · "
+            f"pages {', '.join(chunk.page_ids)} · "
+            f"{_excerpt(chunk.text, 240)}"
+        )
         marker = (
             f'<sup class="claim-citation" title="{html.escape(tooltip, quote=True)}">'
             f"[{index}]</sup>"
@@ -676,11 +711,16 @@ def _event_date(
     return f"{year:04d}-{month:02d}-{day:02d}"
 
 
-def _chunk_for_source(store: ClaimStore, source_ref: str) -> DocumentChunk | None:
-    return next(
+def _require_chunk_for_source(store: ClaimStore, source_ref: str) -> DocumentChunk:
+    chunk = next(
         (chunk for chunk in store.chunks if chunk.source_ref == source_ref),
         None,
     )
+    if chunk is None:
+        raise ChunkNotFoundError(
+            f"Citation source not found in claim {store.manifest.claim_id}: {source_ref}"
+        )
+    return chunk
 
 
 def _excerpt(value: str, limit: int) -> str:

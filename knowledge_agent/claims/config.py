@@ -26,59 +26,64 @@ class ClaimSettings:
     document_intelligence_api_key: str | None = field(default=None, repr=False)
     document_intelligence_connection_name: str | None = None
 
-    @classmethod
-    def from_env(cls) -> "ClaimSettings":
-        return cls(
-            data_root=Path(optional_env("CLAIM_DATA_ROOT") or "data/claims"),
-            document_intelligence_endpoint=optional_env(
-                "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT"
-            ),
-            document_intelligence_api_key=optional_env(
-                "AZURE_DOCUMENT_INTELLIGENCE_API_KEY"
-            ),
-            document_intelligence_connection_name=optional_env(
-                "AZURE_DOCUMENT_INTELLIGENCE_CONNECTION_NAME"
-            ),
-            snowflake_connection_name=(
-                optional_env("SNOWFLAKE_CONNECTION_NAME")
-                or DEFAULT_SNOWFLAKE_CONNECTION_NAME
-            ),
-            snowflake_embedding_model=(
-                optional_env("SNOWFLAKE_EMBEDDING_MODEL")
-                or DEFAULT_SNOWFLAKE_EMBEDDING_MODEL
-            ),
-        )
 
-    def require_ingestion(self, profile: DeploymentProfile) -> None:
-        if profile == "api_key":
-            if not self.document_intelligence_endpoint:
-                raise ConfigurationError(
-                    "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT is required for "
-                    "the api_key profile"
-                )
-            if not self.document_intelligence_api_key:
-                raise ConfigurationError(
-                    "AZURE_DOCUMENT_INTELLIGENCE_API_KEY is required for "
-                    "the api_key profile"
-                )
-            validate_document_intelligence_endpoint(
-                self.document_intelligence_endpoint,
-                require_custom_subdomain=False,
-            )
-            return
+def load_claim_settings() -> ClaimSettings:
+    return ClaimSettings(
+        data_root=Path(optional_env("CLAIM_DATA_ROOT") or "data/claims"),
+        document_intelligence_endpoint=optional_env(
+            "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT"
+        ),
+        document_intelligence_api_key=optional_env(
+            "AZURE_DOCUMENT_INTELLIGENCE_API_KEY"
+        ),
+        document_intelligence_connection_name=optional_env(
+            "AZURE_DOCUMENT_INTELLIGENCE_CONNECTION_NAME"
+        ),
+        snowflake_connection_name=(
+            optional_env("SNOWFLAKE_CONNECTION_NAME")
+            or DEFAULT_SNOWFLAKE_CONNECTION_NAME
+        ),
+        snowflake_embedding_model=(
+            optional_env("SNOWFLAKE_EMBEDDING_MODEL")
+            or DEFAULT_SNOWFLAKE_EMBEDDING_MODEL
+        ),
+    )
 
-        if not self.document_intelligence_connection_name:
+
+def require_ingestion_settings(
+    settings: ClaimSettings,
+    profile: DeploymentProfile,
+) -> None:
+    if profile == "api_key":
+        if not settings.document_intelligence_endpoint:
             raise ConfigurationError(
-                "AZURE_DOCUMENT_INTELLIGENCE_CONNECTION_NAME is required for "
-                "the azure_project profile"
+                "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT is required for "
+                "the api_key profile"
             )
-        self.require_semantic_retrieval()
+        if not settings.document_intelligence_api_key:
+            raise ConfigurationError(
+                "AZURE_DOCUMENT_INTELLIGENCE_API_KEY is required for "
+                "the api_key profile"
+            )
+        validate_document_intelligence_endpoint(
+            settings.document_intelligence_endpoint,
+            require_custom_subdomain=False,
+        )
+        return
 
-    def require_semantic_retrieval(self) -> None:
-        if not self.snowflake_connection_name:
-            raise ConfigurationError("SNOWFLAKE_CONNECTION_NAME cannot be empty")
-        if not self.snowflake_embedding_model:
-            raise ConfigurationError("SNOWFLAKE_EMBEDDING_MODEL cannot be empty")
+    if not settings.document_intelligence_connection_name:
+        raise ConfigurationError(
+            "AZURE_DOCUMENT_INTELLIGENCE_CONNECTION_NAME is required for "
+            "the azure_project profile"
+        )
+    require_semantic_retrieval_settings(settings)
+
+
+def require_semantic_retrieval_settings(settings: ClaimSettings) -> None:
+    if not settings.snowflake_connection_name:
+        raise ConfigurationError("SNOWFLAKE_CONNECTION_NAME cannot be empty")
+    if not settings.snowflake_embedding_model:
+        raise ConfigurationError("SNOWFLAKE_EMBEDDING_MODEL cannot be empty")
 
 
 def validate_document_intelligence_endpoint(

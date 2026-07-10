@@ -5,11 +5,10 @@ import pytest
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
-from knowledge_agent.claims.store import ClaimStore
-from knowledge_agent.llm.client import open_responses_client
+from knowledge_agent.claims.store import load_claim_store
+from knowledge_agent.agents.claim_researcher import run_claim_research
+from knowledge_agent.llm.client import open_structured_output_parser
 from knowledge_agent.llm.config import LlmSettings
-from knowledge_agent.research.agent import run_claim_research
-from knowledge_agent.research.llm import ResponsesResearchModel
 
 
 load_dotenv()
@@ -25,8 +24,8 @@ class CityAnswer(BaseModel):
 
 
 def assert_city_contract(settings: LlmSettings) -> None:
-    with open_responses_client(settings) as client:
-        result = client.parse(
+    with open_structured_output_parser(settings) as parse_structured_output:
+        result = parse_structured_output(
             "Return the requested city and country.",
             "Give the capital of France and its country.",
             CityAnswer,
@@ -93,14 +92,13 @@ def test_azure_research_golden_dataset():
 
     cases = json.loads(GOLDEN_DATASET.read_text(encoding="utf-8"))
     settings = azure_settings()
-    with open_responses_client(settings) as client:
-        model = ResponsesResearchModel(client)
-        store = ClaimStore(SAMPLE_OUTPUT)
+    with open_structured_output_parser(settings) as parse_structured_output:
+        store = load_claim_store(SAMPLE_OUTPUT)
         for case in cases:
             answer = run_claim_research(
                 store=store,
                 question=case["question"],
-                model=model,
+                parse_structured_output=parse_structured_output,
                 queries_per_question=1,
                 max_depth=1,
                 top_k=2,

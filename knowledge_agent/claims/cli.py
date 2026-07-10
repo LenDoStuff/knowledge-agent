@@ -6,11 +6,11 @@ import argparse
 import logging
 from pathlib import Path
 
-from knowledge_agent.claims.config import ClaimSettings
+from knowledge_agent.claims.config import load_claim_settings
 from knowledge_agent.claims.dependencies import live_ingestion_services
 from knowledge_agent.claims.pipeline import ingest_claim_folder, ingest_claim_pdf
 from knowledge_agent.config import load_profile
-from knowledge_agent.llm.config import LlmSettings
+from knowledge_agent.llm.config import load_llm_settings
 
 
 LOG_PATH = Path("logs") / "claims.log"
@@ -37,8 +37,8 @@ def main() -> None:
     args = build_parser().parse_args()
     configure_logging(args.log_level)
     profile = load_profile()
-    claim_settings = ClaimSettings.from_env()
-    llm_settings = LlmSettings.from_env(profile)
+    claim_settings = load_claim_settings()
+    llm_settings = load_llm_settings(profile)
     with live_ingestion_services(
         args.claim_id,
         claim_settings,

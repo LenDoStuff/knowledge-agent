@@ -8,14 +8,16 @@ searchable evidence and producing cited research answers.
 ```text
 knowledge_agent/
   config.py
-  llm/       # provider configuration and structured Responses calls
+  agents/    # classifier/researcher prompts, models, tools, workflows
+  llm/       # provider configuration and structured-output calls
   claims/    # ingestion, persistence, lexical/semantic retrieval
-  research/  # query planning, evidence validation, answer writing
+  research/  # research CLI
 ```
 
-Dependencies flow in one direction: `research` depends on `claims` and `llm`,
-while `claims` depends on `llm`. The shared LLM package contains no claim or
-research behavior.
+AI behavior lives under `agents/`: the document classifier supports ingestion,
+and the claim researcher supports cited answers. The shared `llm` package
+contains provider setup only; claim and research prompts stay in their owning
+agent packages.
 
 ## Runtime profiles
 
