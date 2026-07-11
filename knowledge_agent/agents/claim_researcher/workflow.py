@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from typing import Literal
 
 from knowledge_agent.agents.claim_researcher.llm import (
     extract_findings,
@@ -14,10 +15,13 @@ from knowledge_agent.agents.claim_researcher.llm import (
 )
 from knowledge_agent.agents.claim_researcher.models import (
     ChatMessage,
+    ResearchAuditEntry,
     ResearchAnswer,
+    ResearchLlmAuditEntry,
     ResearchQuery,
     ResearchSearch,
     ResearchStep,
+    ResearchToolAuditEntry,
 )
 from knowledge_agent.agents.claim_researcher.state import ResearchState, _QueryResult
 from knowledge_agent.agents.claim_researcher.tools import claim_search
@@ -33,6 +37,12 @@ from knowledge_agent.llm.client import StructuredOutputParser
 
 LOGGER = logging.getLogger(__name__)
 _MAX_CONCURRENT_WORKERS = 4
+ResearchLlmOperation = Literal[
+    "plan_research",
+    "extract_findings",
+    "review_gaps",
+    "write_answer",
+]
 
 
 def run_claim_research(
@@ -44,6 +54,7 @@ def run_claim_research(
     top_k: int = 8,
     history: Sequence[ChatMessage] = (),
     on_step: Callable[[ResearchStep], None] | None = None,
+    on_audit: Callable[[ResearchAuditEntry], None] | None = None,
 ) -> ResearchAnswer:
     question = _validate_research_request(
         question,
@@ -68,6 +79,7 @@ def run_claim_research(
         parse_structured_output,
         queries_per_question,
         on_step,
+        on_audit,
     )
     _run_research_layers(
         store,
@@ -79,6 +91,7 @@ def run_claim_research(
         max_depth,
         top_k,
         on_step,
+        on_audit,
     )
     return _finish_research(
         question,
@@ -86,6 +99,7 @@ def run_claim_research(
         parse_structured_output,
         state,
         on_step,
+        on_audit,
     )
 
 
@@ -114,9 +128,10 @@ def _start_research(
     parse_structured_output: StructuredOutputParser,
     queries_per_question: int,
     on_step: Callable[[ResearchStep], None] | None,
+    on_audit: Callable[[ResearchAuditEntry], None] | None,
 ) -> ResearchState:
     plan = plan_research(
-        parse_structured_output,
+        _audited_parser(parse_structured_output, "plan_research", on_audit),
         question,
         conversation,
         store.documents,
@@ -147,6 +162,7 @@ def _run_research_layers(
     max_depth: int,
     top_k: int,
     on_step: Callable[[ResearchStep], None] | None,
+    on_audit: Callable[[ResearchAuditEntry], None] | None,
 ) -> None:
     pending_queries = unique_queries(state.plan.queries)[:queries_per_question]
     seen_queries: set[str] = set()
@@ -165,8 +181,15 @@ def _run_research_layers(
             layer_queries,
             parse_structured_output,
             top_k,
+            on_audit,
         )
-        _commit_query_results(state, query_results, layer_index + 1, on_step)
+        _commit_query_results(
+            state,
+            query_results,
+            layer_index + 1,
+            on_step,
+            on_audit,
+        )
         if layer_index == max_depth - 1:
             break
 
@@ -181,6 +204,7 @@ def _run_research_layers(
             layer_query_count,
             layer_index + 1,
             on_step,
+            on_audit,
         )
         if not pending_queries:
             break
@@ -205,26 +229,82 @@ def _execute_queries(
     queries: list[ResearchQuery],
     parse_structured_output: StructuredOutputParser,
     top_k: int,
-) -> Iterator[_QueryResult]:
+    on_audit: Callable[[ResearchAuditEntry], None] | None,
+) -> list[_QueryResult]:
     def execute_query(query: ResearchQuery) -> _QueryResult:
-        evidence = claim_search(store, query, top_k)
+        audit_entries: list[ResearchAuditEntry] = []
+        capture = audit_entries.append if on_audit is not None else None
+        try:
+            evidence = claim_search(store, query, top_k)
+        except Exception as exc:
+            if capture is not None:
+                capture(
+                    ResearchToolAuditEntry(
+                        query=query,
+                        top_k=top_k,
+                        error=_error_message(exc),
+                    )
+                )
+            return _QueryResult(
+                query=query,
+                evidence=[],
+                findings=[],
+                audit_entries=audit_entries,
+                error=exc,
+            )
+
+        if capture is not None:
+            capture(
+                ResearchToolAuditEntry(
+                    query=query,
+                    top_k=top_k,
+                    result=evidence,
+                )
+            )
+        try:
+            findings = extract_findings(
+                _audited_parser(
+                    parse_structured_output,
+                    "extract_findings",
+                    capture,
+                ),
+                query,
+                evidence,
+            )
+        except Exception as exc:
+            return _QueryResult(
+                query=query,
+                evidence=evidence,
+                findings=[],
+                audit_entries=audit_entries,
+                error=exc,
+            )
         return _QueryResult(
             query=query,
             evidence=evidence,
-            findings=extract_findings(parse_structured_output, query, evidence),
+            findings=findings,
+            audit_entries=audit_entries,
         )
 
     with ThreadPoolExecutor(max_workers=_MAX_CONCURRENT_WORKERS) as executor:
-        yield from executor.map(execute_query, queries)
+        return list(executor.map(execute_query, queries))
 
 
 def _commit_query_results(
     state: ResearchState,
-    query_results: Iterable[_QueryResult],
+    query_results: list[_QueryResult],
     layer_number: int,
     on_step: Callable[[ResearchStep], None] | None,
+    on_audit: Callable[[ResearchAuditEntry], None] | None,
 ) -> None:
+    if on_audit is not None:
+        for result in query_results:
+            for entry in result.audit_entries:
+                on_audit(entry)
+
     for result in query_results:
+        if result.error is not None:
+            raise result.error
         validate_finding_sources(result.findings, result.evidence)
         for item in result.evidence:
             state.evidence_by_ref.setdefault(item.source_ref, item)
@@ -276,9 +356,10 @@ def _plan_follow_up_queries(
     query_limit: int,
     layer_number: int,
     on_step: Callable[[ResearchStep], None] | None,
+    on_audit: Callable[[ResearchAuditEntry], None] | None,
 ) -> list[ResearchQuery]:
     review = review_gaps(
-        parse_structured_output,
+        _audited_parser(parse_structured_output, "review_gaps", on_audit),
         question,
         conversation,
         state.plan,
@@ -320,9 +401,10 @@ def _finish_research(
     parse_structured_output: StructuredOutputParser,
     state: ResearchState,
     on_step: Callable[[ResearchStep], None] | None,
+    on_audit: Callable[[ResearchAuditEntry], None] | None,
 ) -> ResearchAnswer:
     draft = write_answer(
-        parse_structured_output,
+        _audited_parser(parse_structured_output, "write_answer", on_audit),
         question,
         conversation,
         state.plan,
@@ -369,3 +451,43 @@ def _record_step(
     state.steps.append(step)
     if on_step is not None:
         on_step(step)
+
+
+def _audited_parser(
+    parse_structured_output: StructuredOutputParser,
+    operation: ResearchLlmOperation,
+    on_audit: Callable[[ResearchAuditEntry], None] | None,
+) -> StructuredOutputParser:
+    if on_audit is None:
+        return parse_structured_output
+
+    def parse(system: str, user: str, response_model):
+        try:
+            parsed = parse_structured_output(system, user, response_model)
+        except Exception as exc:
+            on_audit(
+                ResearchLlmAuditEntry(
+                    operation=operation,
+                    response_model=response_model.__name__,
+                    system_prompt=system,
+                    user_prompt=user,
+                    error=_error_message(exc),
+                )
+            )
+            raise
+        on_audit(
+            ResearchLlmAuditEntry(
+                operation=operation,
+                response_model=response_model.__name__,
+                system_prompt=system,
+                user_prompt=user,
+                result=parsed.model_dump(mode="json"),
+            )
+        )
+        return parsed
+
+    return parse
+
+
+def _error_message(exc: Exception) -> str:
+    return str(exc) or exc.__class__.__name__

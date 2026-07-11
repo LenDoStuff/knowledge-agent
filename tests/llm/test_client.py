@@ -26,18 +26,6 @@ class FakeEndpoint:
             raise self.result
         return self.result
 
-    create = parse
-
-
-def fake_chat_client(result):
-    endpoint = FakeEndpoint(result)
-    client = SimpleNamespace(
-        chat=SimpleNamespace(completions=endpoint),
-        responses=FakeEndpoint(AssertionError("Responses API should not be used")),
-    )
-    return client, endpoint
-
-
 def fake_responses_client(result):
     endpoint = FakeEndpoint(result)
     client = SimpleNamespace(
@@ -83,26 +71,9 @@ def completed_response(parsed=None):
     )
 
 
-def completed_chat(content=None, *, finish_reason="stop", refusal=None):
-    return SimpleNamespace(
-        choices=[
-            SimpleNamespace(
-                finish_reason=finish_reason,
-                message=SimpleNamespace(content=content, refusal=refusal),
-            )
-        ],
-        _request_id="req_chat",
-        usage=SimpleNamespace(
-            prompt_tokens=10,
-            completion_tokens=8,
-            completion_tokens_details=SimpleNamespace(reasoning_tokens=None),
-        ),
-    )
-
-
-def test_nvidia_uses_json_mode_structured_output(caplog):
-    raw_client, endpoint = fake_chat_client(
-        completed_chat(Answer(city="Paris", country="France").model_dump_json())
+def test_nvidia_uses_responses_structured_output(caplog):
+    raw_client, endpoint = fake_responses_client(
+        completed_response(Answer(city="Paris", country="France"))
     )
     with caplog.at_level(logging.INFO):
         result = parse_structured_output(nvidia_settings(), raw_client, "system", "user", Answer)
@@ -110,15 +81,14 @@ def test_nvidia_uses_json_mode_structured_output(caplog):
     request = endpoint.calls[0]
     assert result == Answer(city="Paris", country="France")
     assert request["model"] == "deepseek-ai/deepseek-v4-pro"
-    assert request["temperature"] == 0
-    assert request["extra_body"] == {"response_mode": "json_object"}
-    assert request["messages"][0]["role"] == "system"
-    assert "JSON" in request["messages"][0]["content"]
-    assert '"city"' in request["messages"][0]["content"]
-    assert request["messages"][1] == {"role": "user", "content": "user"}
+    assert request["reasoning"] == {"effort": "low"}
+    assert request["text_format"] is Answer
+    assert request["input"] == [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "user"},
+    ]
     assert "provider=nvidia" in caplog.text
-    assert "api=chat_completions" in caplog.text
-    assert "request_id=req_chat" in caplog.text
+    assert "request_id=req_responses" in caplog.text
     assert "secret-test-key" not in caplog.text
 
 
@@ -138,7 +108,7 @@ def test_azure_uses_responses_structured_output():
 
 
 def _status_error(error_type, status_code):
-    request = httpx.Request("POST", "https://provider.example/v1/chat/completions")
+    request = httpx.Request("POST", "https://provider.example/v1/responses")
     response = httpx.Response(status_code, request=request)
     return error_type("secret-test-key", response=response, body=None)
 
@@ -168,7 +138,7 @@ def _status_error(error_type, status_code):
 def test_provider_errors_are_normalized_without_secret_details(
     caplog, provider_error, category
 ):
-    raw_client, _ = fake_chat_client(provider_error)
+    raw_client, _ = fake_responses_client(provider_error)
     with caplog.at_level(logging.ERROR):
         with pytest.raises(LlmError) as raised:
             parse_structured_output(
@@ -182,31 +152,24 @@ def test_provider_errors_are_normalized_without_secret_details(
 def test_structured_validation_error_is_normalized():
     with pytest.raises(ValidationError) as validation:
         Answer.model_validate({"city": "Paris"})
-    raw_client, _ = fake_chat_client(validation.value)
+    raw_client, _ = fake_responses_client(validation.value)
     with pytest.raises(LlmError) as raised:
         parse_structured_output(nvidia_settings(), raw_client, "system", "user", Answer)
     assert raised.value.category == "output"
 
 
-def test_chat_incomplete_and_refusal_responses_are_explicit():
-    raw_client, _ = fake_chat_client(completed_chat(finish_reason="length"))
-    with pytest.raises(LlmError) as raised:
-        parse_structured_output(nvidia_settings(), raw_client, "system", "user", Answer)
-    assert raised.value.category == "incomplete"
-
-    raw_client, _ = fake_chat_client(completed_chat(refusal="Cannot comply"))
-    with pytest.raises(LlmError) as raised:
-        parse_structured_output(nvidia_settings(), raw_client, "system", "user", Answer)
-    assert raised.value.category == "refusal"
-
-
-def test_responses_incomplete_and_refusal_responses_are_explicit():
+@pytest.mark.parametrize(
+    "settings",
+    [nvidia_settings(), azure_settings()],
+    ids=["nvidia", "azure"],
+)
+def test_responses_incomplete_and_refusal_responses_are_explicit(settings):
     incomplete = completed_response()
     incomplete.status = "incomplete"
     incomplete.incomplete_details = SimpleNamespace(reason="provider_limit")
     raw_client, _ = fake_responses_client(incomplete)
     with pytest.raises(LlmError) as raised:
-        parse_structured_output(azure_settings(), raw_client, "system", "user", Answer)
+        parse_structured_output(settings, raw_client, "system", "user", Answer)
     assert raised.value.category == "incomplete"
 
     refusal = completed_response()
@@ -217,5 +180,5 @@ def test_responses_incomplete_and_refusal_responses_are_explicit():
     ]
     raw_client, _ = fake_responses_client(refusal)
     with pytest.raises(LlmError) as raised:
-        parse_structured_output(azure_settings(), raw_client, "system", "user", Answer)
+        parse_structured_output(settings, raw_client, "system", "user", Answer)
     assert raised.value.category == "refusal"

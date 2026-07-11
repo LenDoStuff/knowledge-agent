@@ -35,3 +35,9 @@ credentials server-side; the UI should not ask users to paste secrets.
 Research answers render only when every citation resolves to evidence in the
 selected claim. Missing or stale citation references surface as explicit UI
 errors instead of partially rendered answers.
+
+The research chat also owns an off-by-default, session-wide Audit mode. When it
+is enabled before a turn, the app retains that turn's exact Research Agent
+prompts, parsed outputs, retrieval inputs, and full evidence in Streamlit
+session state. Successful and failed traces are never persisted to a claim
+folder and are removed when that claim's chat is cleared.

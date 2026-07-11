@@ -71,11 +71,21 @@ streamlit run knowledge_agent/app.py
 
 Select an existing claim from `CLAIM_DATA_ROOT`, or ingest either one combined
 claim PDF or several already-separated document PDFs from the sidebar. The
-knowledge-base tab shows document metadata, parties, events, evidence chunks,
-OCR page text, an aggregate timeline, a claim-wide party list, and exact source
-references. The chat tab researches only the selected claim, keeps its
-conversation history for the current browser session, annotates answers with
-source tooltips, and exposes the agent's steps and retrieval tool calls.
+knowledge-base tab separates the aggregate timeline, claim-wide party list,
+and document workspace. The Documents view summarizes every file and its
+metadata, then organizes the selected document's metadata, evidence chunks,
+OCR page text, and exact source references into focused tabs. The chat tab
+researches only the selected claim, keeps its conversation history for the
+current browser session, annotates answers with source tooltips, and exposes
+the agent's steps and retrieval tool calls. An off-by-default Audit mode records
+every Research Agent system/user prompt and parsed result plus full retrieval
+inputs and evidence. Each captured turn has its own audit expander, including
+partial traces for failed runs.
+
+Audit traces can repeat complete claim evidence and conversation text. They are
+kept only in the current Streamlit session, are hidden when Audit mode is off,
+and are removed with the selected claim's chat history. They are not written to
+the claim directory.
 
 The app uses the active `KNOWLEDGE_AGENT_PROFILE` and the same `.env` provider
 configuration as the CLIs. Credentials remain server-side and are never entered

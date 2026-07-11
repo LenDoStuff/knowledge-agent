@@ -39,6 +39,52 @@ class EvidenceItem(BaseModel):
     text: str
 
 
+class ResearchLlmAuditEntry(BaseModel):
+    kind: Literal["llm"] = "llm"
+    operation: Literal[
+        "plan_research",
+        "extract_findings",
+        "review_gaps",
+        "write_answer",
+    ]
+    response_model: NonEmptyText
+    system_prompt: str = Field(min_length=1)
+    user_prompt: str = Field(min_length=1)
+    result: dict[str, object] | None = None
+    error: str | None = None
+
+    @model_validator(mode="after")
+    def require_result_or_error(self) -> "ResearchLlmAuditEntry":
+        if (self.result is None) == (self.error is None):
+            raise ValueError("an LLM audit entry requires exactly one result or error")
+        return self
+
+
+class ResearchToolAuditEntry(BaseModel):
+    kind: Literal["tool"] = "tool"
+    tool_name: Literal["claim_search"] = "claim_search"
+    query: ResearchQuery
+    top_k: int = Field(ge=1)
+    result: list[EvidenceItem] | None = None
+    error: str | None = None
+
+    @model_validator(mode="after")
+    def require_result_or_error(self) -> "ResearchToolAuditEntry":
+        if (self.result is None) == (self.error is None):
+            raise ValueError("a tool audit entry requires exactly one result or error")
+        return self
+
+
+ResearchAuditEntry = Annotated[
+    ResearchLlmAuditEntry | ResearchToolAuditEntry,
+    Field(discriminator="kind"),
+]
+
+
+class ResearchAuditTrail(BaseModel):
+    entries: list[ResearchAuditEntry] = Field(default_factory=list)
+
+
 class ResearchFinding(BaseModel):
     insight: NonEmptyText
     source_refs: list[NonEmptyText] = Field(min_length=1)

@@ -12,9 +12,11 @@ from knowledge_agent.agents.claim_researcher.models import (
     ChatMessage,
     DraftAnswer,
     GapReview,
+    ResearchLlmAuditEntry,
     ResearchFinding,
     ResearchPlan,
     ResearchQuery,
+    ResearchToolAuditEntry,
 )
 from knowledge_agent.claims.store import load_claim_store
 
@@ -204,8 +206,41 @@ def test_run_claim_research_uses_history_manifest_and_retrieved_evidence():
     assert answer.gap_reviews == []
 
 
+def test_audit_captures_exact_prompts_parsed_results_and_full_evidence():
+    parse, _ = build_research_parser()
+    audit = []
+
+    run_claim_research(
+        store=load_claim_store(SAMPLE_OUTPUT),
+        question="What repairs were invoiced?",
+        parse_structured_output=parse,
+        max_depth=1,
+        on_audit=audit.append,
+    )
+
+    assert [entry.kind for entry in audit] == ["llm", "tool", "llm", "llm"]
+    assert [
+        entry.operation
+        for entry in audit
+        if isinstance(entry, ResearchLlmAuditEntry)
+    ] == ["plan_research", "extract_findings", "write_answer"]
+    plan_entry = audit[0]
+    assert isinstance(plan_entry, ResearchLlmAuditEntry)
+    assert "You plan focused research" in plan_entry.system_prompt
+    assert "Current question: What repairs were invoiced?" in plan_entry.user_prompt
+    assert plan_entry.result == _default_plan().model_dump(mode="json")
+    tool_entry = audit[1]
+    assert isinstance(tool_entry, ResearchToolAuditEntry)
+    assert tool_entry.query.query == "repair invoice"
+    assert tool_entry.top_k == 8
+    assert tool_entry.result is not None
+    assert tool_entry.result[0].source_ref == INVOICE_REF
+    assert "front bumper cover" in tool_entry.result[0].text
+
+
 def test_gap_review_adds_a_smaller_second_research_layer():
     parse, state = build_research_parser()
+    audit = []
 
     answer = run_claim_research(
         store=load_claim_store(SAMPLE_OUTPUT),
@@ -213,6 +248,7 @@ def test_gap_review_adds_a_smaller_second_research_layer():
         parse_structured_output=parse,
         queries_per_question=4,
         max_depth=3,
+        on_audit=audit.append,
     )
 
     assert [search.query.query for search in answer.searches] == [
@@ -224,6 +260,18 @@ def test_gap_review_adds_a_smaller_second_research_layer():
     assert [step.stage for step in answer.steps].count("gap_review") == 2
     assert len(answer.findings) == 2
     assert answer.source_refs == [INVOICE_REF, FNOL_REF]
+    assert [
+        entry.operation
+        for entry in audit
+        if isinstance(entry, ResearchLlmAuditEntry)
+    ] == [
+        "plan_research",
+        "extract_findings",
+        "review_gaps",
+        "extract_findings",
+        "review_gaps",
+        "write_answer",
+    ]
 
 
 def test_complete_gap_review_stops_without_another_search():
@@ -264,6 +312,12 @@ def test_research_queries_run_concurrently_and_commit_in_plan_order():
         on_extract=on_extract,
     )
     callback_threads = []
+    audit = []
+    audit_callback_threads = []
+
+    def record_audit(entry):
+        audit.append(entry)
+        audit_callback_threads.append(get_ident())
 
     answer = run_claim_research(
         load_claim_store(SAMPLE_OUTPUT),
@@ -271,13 +325,100 @@ def test_research_queries_run_concurrently_and_commit_in_plan_order():
         parse,
         max_depth=1,
         on_step=lambda step: callback_threads.append(get_ident()),
+        on_audit=record_audit,
     )
 
     assert len(worker_threads) == 4
     assert get_ident() not in worker_threads
     assert set(callback_threads) == {get_ident()}
+    assert set(audit_callback_threads) == {get_ident()}
     assert [search.query.query for search in answer.searches] == query_texts
     assert [step.query for step in answer.steps if step.stage == "tool"] == query_texts
+    assert [
+        entry.query.query
+        for entry in audit
+        if isinstance(entry, ResearchToolAuditEntry)
+    ] == query_texts
+
+
+def test_audit_retains_complete_concurrent_layer_when_extraction_fails():
+    query_texts = ["alpha", "bravo"]
+    plan = ResearchPlan(
+        objectives=["Test failed concurrent research."],
+        queries=[
+            ResearchQuery(query=value, research_goal=f"Search {value}.")
+            for value in query_texts
+        ],
+    )
+
+    def parse(_system, user, response_model):
+        if response_model is ResearchPlan:
+            return plan
+        if response_model is FindingSet:
+            query = _query_from_extract_prompt(user)
+            if query == "alpha":
+                raise RuntimeError("alpha extraction failed")
+            return FindingSet(findings=[])
+        raise AssertionError(f"Unexpected response model: {response_model}")
+
+    audit = []
+    callback_threads = []
+
+    def record_audit(entry):
+        audit.append(entry)
+        callback_threads.append(get_ident())
+
+    with pytest.raises(RuntimeError, match="alpha extraction failed"):
+        run_claim_research(
+            load_claim_store(SAMPLE_OUTPUT),
+            "Run two searches.",
+            parse,
+            max_depth=1,
+            on_audit=record_audit,
+        )
+
+    assert set(callback_threads) == {get_ident()}
+    assert [
+        entry.query.query
+        for entry in audit
+        if isinstance(entry, ResearchToolAuditEntry)
+    ] == query_texts
+    extraction_entries = [
+        entry
+        for entry in audit
+        if isinstance(entry, ResearchLlmAuditEntry)
+        and entry.operation == "extract_findings"
+    ]
+    assert len(extraction_entries) == 2
+    assert extraction_entries[0].error == "alpha extraction failed"
+    assert extraction_entries[1].result == {"findings": []}
+
+
+def test_audit_records_retrieval_failure(monkeypatch):
+    parse, _ = build_research_parser()
+    audit = []
+
+    def fail_search(*_args):
+        raise RuntimeError("search unavailable")
+
+    monkeypatch.setattr(
+        "knowledge_agent.agents.claim_researcher.workflow.claim_search",
+        fail_search,
+    )
+
+    with pytest.raises(RuntimeError, match="search unavailable"):
+        run_claim_research(
+            load_claim_store(SAMPLE_OUTPUT),
+            "What repairs were invoiced?",
+            parse,
+            max_depth=1,
+            on_audit=audit.append,
+        )
+
+    assert len(audit) == 2
+    assert isinstance(audit[1], ResearchToolAuditEntry)
+    assert audit[1].result is None
+    assert audit[1].error == "search unavailable"
 
 
 def test_duplicate_queries_and_findings_are_executed_once():
@@ -309,13 +450,22 @@ def test_finding_cannot_cite_source_outside_query_evidence():
         }
     )
 
+    audit = []
     with pytest.raises(ValueError, match="outside retrieved evidence"):
         run_claim_research(
             load_claim_store(SAMPLE_OUTPUT),
             "What repairs were invoiced?",
             parse,
             max_depth=1,
+            on_audit=audit.append,
         )
+
+    extraction_entry = audit[-1]
+    assert isinstance(extraction_entry, ResearchLlmAuditEntry)
+    assert extraction_entry.operation == "extract_findings"
+    assert extraction_entry.error is None
+    assert extraction_entry.result is not None
+    assert extraction_entry.result["findings"][0]["insight"] == "Unsupported claim."
 
 
 def test_page_suffix_on_finding_source_is_rejected():

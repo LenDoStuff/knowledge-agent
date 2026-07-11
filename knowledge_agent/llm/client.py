@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -50,9 +49,6 @@ def parse_structured_output(
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
-    if settings.profile == "api_key":
-        return _parse_nvidia(settings, client, messages, response_model, logger)
-
     response = _request_responses(
         settings,
         client,
@@ -91,92 +87,6 @@ def open_structured_output_parser(
             user,
             response_model,
         )
-
-
-def _parse_nvidia(
-    settings: LlmSettings,
-    client: Any,
-    messages: list[dict[str, str]],
-    response_model: type[ParsedModel],
-    logger: logging.Logger,
-) -> ParsedModel:
-    messages[0]["content"] += (
-        " Return JSON matching this JSON Schema: "
-        f"{json.dumps(response_model.model_json_schema())}"
-    )
-    started = perf_counter()
-    provider = llm_provider(settings)
-    logger.info(
-        "llm_request provider=%s model=%s api=chat_completions retry_count=0",
-        provider,
-        settings.model,
-    )
-    try:
-        completion = client.chat.completions.create(
-            model=settings.model,
-            messages=messages,
-            temperature=0,
-            extra_body={"response_mode": "json_object"},
-        )
-    except Exception as exc:
-        error = normalize_llm_error(settings, exc)
-        logger.error(
-            "llm_error provider=%s model=%s api=chat_completions "
-            "category=%s request_id=%s status_code=%s latency_ms=%d "
-            "retry_count=0",
-            provider,
-            settings.model,
-            error.category,
-            error.request_id,
-            error.status_code,
-            round((perf_counter() - started) * 1000),
-        )
-        raise error from None
-
-    request_id = _request_id(completion)
-    choice = completion.choices[0] if completion.choices else None
-    message = getattr(choice, "message", None)
-    finish_reason = getattr(choice, "finish_reason", None)
-    usage = _chat_usage(completion)
-    logger.info(
-        "llm_response provider=%s model=%s api=chat_completions "
-        "request_id=%s finish_reason=%s input_tokens=%s output_tokens=%s "
-        "reasoning_tokens=%s latency_ms=%d retry_count=0",
-        provider,
-        settings.model,
-        request_id,
-        finish_reason,
-        usage["input_tokens"],
-        usage["output_tokens"],
-        usage["reasoning_tokens"],
-        round((perf_counter() - started) * 1000),
-    )
-    if finish_reason == "length":
-        raise LlmError(
-            "The response was incomplete: output token limit",
-            provider=provider,
-            category="incomplete",
-            request_id=request_id,
-        )
-    refusal = getattr(message, "refusal", None)
-    content = getattr(message, "content", None)
-    if not content:
-        category = "refusal" if refusal else "output"
-        raise LlmError(
-            f"Missing structured output for {response_model.__name__}",
-            provider=provider,
-            category=category,
-            request_id=request_id,
-        )
-    try:
-        return response_model.model_validate_json(content)
-    except ValidationError:
-        raise LlmError(
-            f"Invalid structured output for {response_model.__name__}",
-            provider=provider,
-            category="output",
-            request_id=request_id,
-        ) from None
 
 
 def _request_responses(
@@ -295,15 +205,5 @@ def _usage(response: Any) -> dict[str, int | None]:
     return {
         "input_tokens": getattr(usage, "input_tokens", None),
         "output_tokens": getattr(usage, "output_tokens", None),
-        "reasoning_tokens": getattr(output_details, "reasoning_tokens", None),
-    }
-
-
-def _chat_usage(response: Any) -> dict[str, int | None]:
-    usage = getattr(response, "usage", None)
-    output_details = getattr(usage, "completion_tokens_details", None)
-    return {
-        "input_tokens": getattr(usage, "prompt_tokens", None),
-        "output_tokens": getattr(usage, "completion_tokens", None),
         "reasoning_tokens": getattr(output_details, "reasoning_tokens", None),
     }

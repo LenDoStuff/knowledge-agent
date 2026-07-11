@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from knowledge_agent.agents.claim_researcher.models import (
     EvidenceItem,
     GapReview,
+    ResearchAuditEntry,
     ResearchFinding,
     ResearchPlan,
     ResearchQuery,
@@ -30,3 +31,5 @@ class _QueryResult:
     query: ResearchQuery
     evidence: list[EvidenceItem]
     findings: list[ResearchFinding]
+    audit_entries: list[ResearchAuditEntry] = field(default_factory=list)
+    error: Exception | None = None

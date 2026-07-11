@@ -9,6 +9,8 @@ from knowledge_agent.app import (
     COMBINED_LABEL,
     SEPARATE_LABEL,
     _cited_answer_html,
+    _conversation_history,
+    _document_rows,
     _is_greeting,
     _party_rows,
     _timeline_rows,
@@ -54,6 +56,70 @@ def llm_settings() -> LlmSettings:
         nvidia_base_url="https://integrate.api.nvidia.com/v1",
         nvidia_api_key_ds4="test-key",
     )
+
+
+def saved_research_answer() -> dict[str, object]:
+    return {
+        "question": "What was repaired?",
+        "answer": "The claim knowledge base does not contain enough evidence.",
+        "plan": {
+            "objectives": ["Identify repaired items."],
+            "queries": [
+                {
+                    "query": "repair invoice",
+                    "research_goal": "Find repaired items.",
+                }
+            ],
+        },
+        "searches": [],
+        "gap_reviews": [],
+        "steps": [],
+        "findings": [],
+        "source_refs": [],
+    }
+
+
+def saved_audit_trail() -> dict[str, object]:
+    source_ref = "CLM-SAMPLE-001/DOC-002#DOC-002-CHUNK-001"
+    return {
+        "entries": [
+            {
+                "kind": "llm",
+                "operation": "plan_research",
+                "response_model": "ResearchPlan",
+                "system_prompt": "Exact system audit prompt.",
+                "user_prompt": "Exact user audit prompt.",
+                "result": {
+                    "objectives": ["Identify repaired items."],
+                    "queries": [
+                        {
+                            "query": "repair invoice",
+                            "research_goal": "Find repaired items.",
+                        }
+                    ],
+                },
+            },
+            {
+                "kind": "tool",
+                "tool_name": "claim_search",
+                "query": {
+                    "query": "repair invoice",
+                    "research_goal": "Find repaired items.",
+                },
+                "top_k": 8,
+                "result": [
+                    {
+                        "document_id": "DOC-002",
+                        "document_type": "invoice",
+                        "document_title": "Repair Invoice",
+                        "page_ids": ["CLM-SAMPLE-001:p2"],
+                        "source_ref": source_ref,
+                        "text": "Parts: front bumper cover",
+                    }
+                ],
+            },
+        ]
+    }
 
 
 def test_discover_claims_returns_valid_entries_and_visible_errors(tmp_path):
@@ -156,6 +222,10 @@ def test_streamlit_app_renders_the_sample_knowledge_base(monkeypatch):
         "Knowledge base",
         "Timeline",
         "Parties",
+        "Documents",
+        "Metadata",
+        "Evidence",
+        "OCR pages",
         "Research chat",
     ]
     assert [(metric.label, metric.value) for metric in app.metric] == [
@@ -163,7 +233,110 @@ def test_streamlit_app_renders_the_sample_knowledge_base(monkeypatch):
         ("Documents", "2"),
         ("Chunks", "2"),
         ("Retrieval", "lexical"),
+        ("Selected document", "DOC-001"),
+        ("Pages", "1"),
+        ("Evidence chunks", "1"),
     ]
+    assert [(toggle.label, toggle.value) for toggle in app.toggle] == [
+        ("Audit mode", False)
+    ]
+
+
+def test_streamlit_app_renders_saved_audit_trail(monkeypatch):
+    monkeypatch.setenv("CLAIM_DATA_ROOT", str(SAMPLE_OUTPUT.parent))
+    research = saved_research_answer()
+    app = AppTest.from_file(str(REPO_ROOT / "knowledge_agent" / "app.py"))
+    app.session_state["research_audit_mode"] = True
+    app.session_state["claim_chat_histories"] = {
+        "CLM-SAMPLE-001": [
+            {
+                "role": "assistant",
+                "content": research["answer"],
+                "research": research,
+                "audit": saved_audit_trail(),
+            }
+        ]
+    }
+
+    app.run(timeout=10)
+
+    assert not app.exception
+    assert any(
+        "Audit traces can contain full claim evidence" in item.value
+        for item in app.warning
+    )
+    assert any(item.label == "Audit trail (2 entries)" for item in app.expander)
+    assert "Exact system audit prompt." in [item.value for item in app.code]
+    assert "Exact user audit prompt." in [item.value for item in app.code]
+
+    clear_chat = next(button for button in app.button if button.label == "Clear chat")
+    clear_chat.click().run(timeout=10)
+
+    assert app.session_state["claim_chat_histories"]["CLM-SAMPLE-001"] == []
+
+
+def test_streamlit_app_identifies_turn_without_captured_audit(monkeypatch):
+    monkeypatch.setenv("CLAIM_DATA_ROOT", str(SAMPLE_OUTPUT.parent))
+    research = saved_research_answer()
+    app = AppTest.from_file(str(REPO_ROOT / "knowledge_agent" / "app.py"))
+    app.session_state["research_audit_mode"] = True
+    app.session_state["claim_chat_histories"] = {
+        "CLM-SAMPLE-001": [
+            {
+                "role": "assistant",
+                "content": research["answer"],
+                "research": research,
+            }
+        ]
+    }
+
+    app.run(timeout=10)
+
+    assert not app.exception
+    assert "Audit mode was not enabled for this turn." in [
+        item.value for item in app.caption
+    ]
+
+
+def test_saved_failed_turn_renders_audit_and_stays_out_of_model_history(monkeypatch):
+    monkeypatch.setenv("CLAIM_DATA_ROOT", str(SAMPLE_OUTPUT.parent))
+    messages = [
+        {
+            "role": "user",
+            "content": "What failed?",
+            "exclude_from_history": True,
+        },
+        {
+            "role": "assistant",
+            "content": "Research failed: model unavailable",
+            "research_error": "model unavailable",
+            "exclude_from_history": True,
+            "audit": {
+                "entries": [
+                    {
+                        "kind": "llm",
+                        "operation": "plan_research",
+                        "response_model": "ResearchPlan",
+                        "system_prompt": "Failed system prompt.",
+                        "user_prompt": "Failed user prompt.",
+                        "error": "model unavailable",
+                    }
+                ]
+            },
+        },
+    ]
+    assert _conversation_history(messages) == []
+
+    app = AppTest.from_file(str(REPO_ROOT / "knowledge_agent" / "app.py"))
+    app.session_state["research_audit_mode"] = True
+    app.session_state["claim_chat_histories"] = {"CLM-SAMPLE-001": messages}
+
+    app.run(timeout=10)
+
+    assert not app.exception
+    assert "Research failed: model unavailable" in [item.value for item in app.error]
+    assert any(item.label == "Audit trail (1 entry)" for item in app.expander)
+    assert "Failed system prompt." in [item.value for item in app.code]
 
 
 def test_claim_overview_aggregates_timeline_and_parties():
@@ -179,6 +352,33 @@ def test_claim_overview_aggregates_timeline_and_parties():
         "Example Mutual",
         "Sample Body Shop",
     }
+
+
+def test_document_inventory_summarizes_extracted_metadata():
+    rows = _document_rows(load_claim_store(SAMPLE_OUTPUT))
+
+    assert rows == [
+        {
+            "ID": "DOC-001",
+            "Type": "fnol",
+            "Title": "First Notice of Loss",
+            "Pages": "1",
+            "Parties": 2,
+            "Events": 2,
+            "Evidence chunks": 1,
+            "File": "DOC-001_fnol.pdf",
+        },
+        {
+            "ID": "DOC-002",
+            "Type": "invoice",
+            "Title": "Repair Invoice",
+            "Pages": "2",
+            "Parties": 2,
+            "Events": 1,
+            "Evidence chunks": 1,
+            "File": "DOC-002_invoice.pdf",
+        },
+    ]
 
 
 def test_citation_marker_contains_a_safe_source_tooltip():

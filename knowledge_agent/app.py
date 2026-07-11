@@ -28,8 +28,12 @@ from knowledge_agent.llm.client import open_structured_output_parser
 from knowledge_agent.llm.config import LlmSettings, load_llm_settings
 from knowledge_agent.agents.claim_researcher import (
     ChatMessage,
+    ResearchAuditEntry,
+    ResearchAuditTrail,
     ResearchAnswer,
+    ResearchLlmAuditEntry,
     ResearchStep,
+    ResearchToolAuditEntry,
     run_claim_research,
 )
 
@@ -298,10 +302,6 @@ def _render_knowledge_base(store: ClaimStore) -> None:
         return
 
     _render_claim_overview(store)
-    document = _select_document(store)
-    _render_document_metadata(document)
-    _render_document_chunks(store, document.id)
-    _render_document_pages(store, document)
 
 
 def _render_claim_metrics(store: ClaimStore) -> None:
@@ -315,7 +315,9 @@ def _render_claim_metrics(store: ClaimStore) -> None:
 
 def _render_claim_overview(store: ClaimStore) -> None:
     st.subheader("Claim overview")
-    timeline_tab, parties_tab = st.tabs(["Timeline", "Parties"])
+    timeline_tab, parties_tab, documents_tab = st.tabs(
+        ["Timeline", "Parties", "Documents"]
+    )
     with timeline_tab:
         _render_timeline(store)
     with parties_tab:
@@ -324,43 +326,92 @@ def _render_claim_overview(store: ClaimStore) -> None:
             st.dataframe(parties, width="stretch", hide_index=True)
         else:
             st.caption("No parties were extracted from this claim.")
+    with documents_tab:
+        _render_documents(store)
 
 
-def _select_document(store: ClaimStore) -> DocumentMetadata:
-    st.subheader("Documents")
+def _render_documents(store: ClaimStore) -> None:
+    st.markdown("#### Document inventory")
+    st.caption(
+        "Browse the claim file, compare extracted metadata, and inspect the "
+        "evidence behind each document."
+    )
     st.dataframe(
-        [
-            {
-                "ID": document.id,
-                "Type": document.document_type,
-                "Title": document.title,
-                "Pages": (
-                    f"{document.page_range.start_page}–{document.page_range.end_page}"
-                ),
-                "File": document.file_name,
-                "Summary": document.summary,
-            }
-            for document in store.documents
-        ],
+        _document_rows(store),
         width="stretch",
         hide_index=True,
     )
+
+    document = _select_document(store)
+    document_chunks = [
+        chunk for chunk in store.chunks if chunk.document_id == document.id
+    ]
+    page_range = _page_range_label(document)
+    columns = st.columns(3)
+    columns[0].metric("Selected document", document.id)
+    columns[1].metric("Pages", page_range)
+    columns[2].metric("Evidence chunks", len(document_chunks))
+
+    st.markdown(f"### {document.title}")
+    st.caption(
+        f"{document.document_type} · {document.file_name} · pages {page_range}"
+    )
+    metadata_tab, evidence_tab, pages_tab = st.tabs(
+        ["Metadata", "Evidence", "OCR pages"]
+    )
+    with metadata_tab:
+        _render_document_metadata(document)
+    with evidence_tab:
+        _render_document_chunks(store, document.id)
+    with pages_tab:
+        _render_document_pages(store, document)
+
+
+def _document_rows(store: ClaimStore) -> list[dict[str, str | int]]:
+    chunk_counts: dict[str, int] = {}
+    for chunk in store.chunks:
+        chunk_counts[chunk.document_id] = chunk_counts.get(chunk.document_id, 0) + 1
+    return [
+        {
+            "ID": document.id,
+            "Type": document.document_type,
+            "Title": document.title,
+            "Pages": _page_range_label(document),
+            "Parties": len(document.involved_parties),
+            "Events": len(document.events),
+            "Evidence chunks": chunk_counts.get(document.id, 0),
+            "File": document.file_name,
+        }
+        for document in store.documents
+    ]
+
+
+def _page_range_label(document: DocumentMetadata) -> str:
+    start = document.page_range.start_page
+    end = document.page_range.end_page
+    return str(start) if start == end else f"{start}–{end}"
+
+
+def _select_document(store: ClaimStore) -> DocumentMetadata:
     selected_document_id = st.selectbox(
-        "Inspect document",
+        "Select a document to inspect",
         [document.id for document in store.documents],
         format_func=lambda document_id: (
             f"{document_id} — {get_document(store, document_id).title}"
         ),
+        key=f"document_select_{store.manifest.claim_id}",
     )
     return get_document(store, selected_document_id)
 
 
 def _render_document_metadata(document: DocumentMetadata) -> None:
-    st.markdown(f"**{document.title}**  \n{document.summary}")
+    with st.container(border=True):
+        st.markdown("##### Summary")
+        st.write(document.summary)
 
     parties_column, events_column = st.columns(2)
     with parties_column:
-        st.markdown("#### Involved parties")
+        st.markdown("##### Involved parties")
         if document.involved_parties:
             st.dataframe(
                 [party.model_dump() for party in document.involved_parties],
@@ -370,7 +421,7 @@ def _render_document_metadata(document: DocumentMetadata) -> None:
         else:
             st.caption("No parties extracted.")
     with events_column:
-        st.markdown("#### Events")
+        st.markdown("##### Events")
         if document.events:
             st.dataframe(
                 [event.model_dump() for event in document.events],
@@ -382,8 +433,12 @@ def _render_document_metadata(document: DocumentMetadata) -> None:
 
 
 def _render_document_chunks(store: ClaimStore, document_id: str) -> None:
-    st.subheader("Evidence chunks")
-    filter_text = st.text_input("Filter chunks", placeholder="Search text or source reference")
+    st.markdown("##### Evidence chunks")
+    filter_text = st.text_input(
+        "Filter chunks",
+        placeholder="Search text or source reference",
+        key=f"chunk_filter_{store.manifest.claim_id}_{document_id}",
+    )
     document_chunks = [
         chunk for chunk in store.chunks if chunk.document_id == document_id
     ]
@@ -410,8 +465,9 @@ def _render_document_chunks(store: ClaimStore, document_id: str) -> None:
             hide_index=True,
         )
         selected_ref = st.selectbox(
-            "Chunk text",
+            "Inspect chunk",
             [chunk.source_ref for chunk in document_chunks],
+            key=f"chunk_select_{store.manifest.claim_id}_{document_id}",
         )
         selected_chunk = _chunk_by_ref(document_chunks, selected_ref)
         st.code(selected_chunk.text, language=None, wrap_lines=True)
@@ -421,7 +477,7 @@ def _render_document_pages(
     store: ClaimStore,
     document: DocumentMetadata,
 ) -> None:
-    st.subheader("OCR pages")
+    st.markdown("##### OCR pages")
     pages = [
         page
         for page in store.pages
@@ -429,7 +485,11 @@ def _render_document_pages(
         <= page.page_number
         <= document.page_range.end_page
     ]
-    selected_page_id = st.selectbox("Page text", [page.page_id for page in pages])
+    selected_page_id = st.selectbox(
+        "Inspect page",
+        [page.page_id for page in pages],
+        key=f"page_select_{store.manifest.claim_id}_{document.id}",
+    )
     st.code(get_page(store, selected_page_id).text, language=None, wrap_lines=True)
 
 
@@ -442,21 +502,31 @@ def _render_chat(
     histories = st.session_state.setdefault("claim_chat_histories", {})
     messages = histories.setdefault(claim_id, [])
 
-    header, action = st.columns([4, 1])
+    header, audit_control, action = st.columns([3, 1, 1])
     header.subheader(f"Research {claim_id}")
+    audit_enabled = audit_control.toggle(
+        "Audit mode",
+        key="research_audit_mode",
+        help=(
+            "Capture exact Research Agent prompts, parsed model results, and "
+            "full retrieval results for this browser session."
+        ),
+    )
     if action.button("Clear chat", key=f"clear_chat_{claim_id}", width="stretch"):
         histories[claim_id] = []
         st.rerun()
+    if audit_enabled:
+        st.warning(
+            "Audit traces can contain full claim evidence and conversation text. "
+            "They remain in this session until you clear the chat."
+        )
 
-    _render_chat_history(messages, local_store)
+    _render_chat_history(messages, local_store, audit_enabled)
 
     prompt = st.chat_input("Ask a question about this claim")
     if not prompt:
         return
-    history = [
-        ChatMessage(role=message["role"], content=message["content"])
-        for message in messages
-    ]
+    history = _conversation_history(messages)
     messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -468,10 +538,11 @@ def _render_chat(
             st.markdown(greeting)
         st.rerun()
 
-    try:
-        profile = load_profile()
-        llm_settings = load_llm_settings(profile)
-        with st.chat_message("assistant"):
+    audit_entries: list[ResearchAuditEntry] = []
+    with st.chat_message("assistant"):
+        try:
+            profile = load_profile()
+            llm_settings = load_llm_settings(profile)
             with st.status("Researching the claim…", expanded=True) as status:
                 st.write("Planning searches, gathering evidence, and checking gaps.")
 
@@ -488,40 +559,144 @@ def _render_chat(
                         parse_structured_output=parse_structured_output,
                         history=history,
                         on_step=show_step,
+                        on_audit=audit_entries.append if audit_enabled else None,
                     )
                 status.update(label="Research complete", state="complete")
             _render_cited_answer(answer, local_store)
             _render_research_details(answer, local_store)
-    except Exception as exc:
-        st.error(str(exc))
-        return
+            if audit_enabled:
+                _render_audit_trail(ResearchAuditTrail(entries=audit_entries))
+        except Exception as exc:
+            error = str(exc) or exc.__class__.__name__
+            if audit_enabled:
+                messages[-1]["exclude_from_history"] = True
+                trail = ResearchAuditTrail(entries=audit_entries)
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": f"Research failed: {error}",
+                        "research_error": error,
+                        "exclude_from_history": True,
+                        "audit": trail.model_dump(mode="json"),
+                    }
+                )
+                st.error(f"Research failed: {error}")
+                _render_audit_trail(trail)
+            else:
+                st.error(error)
+            return
 
-    messages.append(
-        {
-            "role": "assistant",
-            "content": answer.answer,
-            "research": answer.model_dump(mode="json"),
-        }
-    )
+    assistant_message = {
+        "role": "assistant",
+        "content": answer.answer,
+        "research": answer.model_dump(mode="json"),
+    }
+    if audit_enabled:
+        assistant_message["audit"] = ResearchAuditTrail(
+            entries=audit_entries
+        ).model_dump(mode="json")
+    messages.append(assistant_message)
     st.rerun()
+
+
+def _conversation_history(
+    messages: Sequence[dict[str, object]],
+) -> list[ChatMessage]:
+    return [
+        ChatMessage(role=message["role"], content=message["content"])
+        for message in messages
+        if not message.get("exclude_from_history", False)
+    ]
 
 
 def _render_chat_history(
     messages: Sequence[dict[str, object]],
     store: ClaimStore,
+    audit_enabled: bool,
 ) -> None:
     for message in messages:
         role = str(message["role"])
         with st.chat_message(role):
-            if message["role"] == "assistant" and "research" in message:
+            if message["role"] == "assistant" and "research_error" in message:
+                st.error(f"Research failed: {message['research_error']}")
+                _render_saved_audit(message, audit_enabled)
+            elif message["role"] == "assistant" and "research" in message:
                 try:
                     answer = ResearchAnswer.model_validate(message["research"])
                     _render_cited_answer(answer, store)
                     _render_research_details(answer, store)
                 except Exception as exc:
                     st.error(f"Could not display saved research answer: {exc}")
+                _render_saved_audit(message, audit_enabled)
             else:
                 st.markdown(str(message["content"]))
+
+
+def _render_saved_audit(
+    message: dict[str, object],
+    audit_enabled: bool,
+) -> None:
+    if not audit_enabled:
+        return
+    saved_audit = message.get("audit")
+    if saved_audit is None:
+        st.caption("Audit mode was not enabled for this turn.")
+        return
+    try:
+        trail = ResearchAuditTrail.model_validate(saved_audit)
+    except Exception as exc:
+        st.error(f"Could not display saved audit trail: {exc}")
+        return
+    _render_audit_trail(trail)
+
+
+def _render_audit_trail(trail: ResearchAuditTrail) -> None:
+    entry_count = len(trail.entries)
+    entry_label = "entry" if entry_count == 1 else "entries"
+    with st.expander(f"Audit trail ({entry_count} {entry_label})"):
+        if not trail.entries:
+            st.caption("No agent calls were captured before the run stopped.")
+            return
+        for index, entry in enumerate(trail.entries, start=1):
+            with st.container(border=True):
+                if isinstance(entry, ResearchLlmAuditEntry):
+                    st.markdown(
+                        f"**{index}. LLM · `{entry.operation}` "
+                        f"→ `{entry.response_model}`**"
+                    )
+                    system_tab, user_tab, result_tab = st.tabs(
+                        ["System prompt", "User prompt", "Result"]
+                    )
+                    with system_tab:
+                        st.code(entry.system_prompt, language=None, wrap_lines=True)
+                    with user_tab:
+                        st.code(entry.user_prompt, language=None, wrap_lines=True)
+                    with result_tab:
+                        if entry.error is not None:
+                            st.error(entry.error)
+                        else:
+                            st.json(entry.result)
+                elif isinstance(entry, ResearchToolAuditEntry):
+                    st.markdown(f"**{index}. Tool · `{entry.tool_name}`**")
+                    input_tab, result_tab = st.tabs(["Input", "Result"])
+                    with input_tab:
+                        st.json(
+                            {
+                                "query": entry.query.query,
+                                "research_goal": entry.query.research_goal,
+                                "top_k": entry.top_k,
+                            }
+                        )
+                    with result_tab:
+                        if entry.error is not None:
+                            st.error(entry.error)
+                        else:
+                            st.json(
+                                [
+                                    item.model_dump(mode="json")
+                                    for item in entry.result or []
+                                ]
+                            )
 
 
 def _render_cited_answer(answer: ResearchAnswer, store: ClaimStore) -> None:

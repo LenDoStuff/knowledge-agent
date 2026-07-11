@@ -22,12 +22,11 @@ OpenAI-compatible endpoint:
 - `nvidia_api_key_ds4`
 - model: `deepseek-ai/deepseek-v4-pro`
 
-NVIDIA structured output is requested through chat completions. The system
-prompt is extended with the target JSON schema, and the request sets
-`response_mode` to `json_object`.
-
-The `azure_project` profile uses the Azure AI Project OpenAI client and the
-Responses structured-output parser.
+Both profiles use the OpenAI Responses structured-output parser with the
+Pydantic response model passed as `text_format`. The SDK sends the model's JSON
+Schema through `text.format`, and the provider must return schema-conforming
+output. The `api_key` profile calls NVIDIA's OpenAI-compatible Responses
+endpoint; the `azure_project` profile uses the Azure AI Project OpenAI client.
 
 ## Constraints
 
