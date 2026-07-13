@@ -1,9 +1,11 @@
-from types import SimpleNamespace
+import asyncio
+
+from pydantic_ai.models.openai import OpenAIChatModel, OpenAIResponsesModel
 
 from knowledge_agent.llm.config import LlmSettings
 from knowledge_agent.llm.providers import (
     create_browser_credential,
-    open_provider_clients,
+    open_agent_runtime,
 )
 
 
@@ -42,45 +44,38 @@ def test_browser_credential_factory_is_explicit(monkeypatch):
         "knowledge_agent.llm.providers.InteractiveBrowserCredential",
         lambda: credential,
     )
-
     assert create_browser_credential() is credential
 
 
-def test_factory_builds_nvidia_client_and_closes_it(monkeypatch):
-    calls = []
-    client = FakeResource()
-
-    def build_client(**kwargs):
-        calls.append(kwargs)
-        return client
-
-    monkeypatch.setattr("knowledge_agent.llm.providers.OpenAI", build_client)
-
-    with open_provider_clients(nvidia_settings()) as provider:
-        assert provider.openai is client
-    assert calls == [
-        {
-            "api_key": "secret-test-key",
-            "base_url": "https://integrate.api.nvidia.com/v1",
-            "max_retries": 0,
-        }
-    ]
-    assert client.closed
+def test_runtime_builds_nvidia_chat_model_and_closes_client():
+    with open_agent_runtime(nvidia_settings()) as runtime:
+        client = runtime.openai
+        assert isinstance(runtime.model, OpenAIChatModel)
+        assert str(client.base_url) == "https://integrate.api.nvidia.com/v1/"
+        assert client.max_retries == 0
+        assert runtime.model.settings["temperature"] == 0
+        assert runtime.model.settings["thinking"] is False
+        assert runtime.azure_project is None
+        assert runtime.azure_credential is None
+        assert not client.is_closed()
+    assert client.is_closed()
 
 
-def test_factory_builds_azure_client_with_browser_credential(monkeypatch):
+def test_runtime_can_open_and_close_inside_a_running_event_loop():
+    async def use_runtime():
+        with open_agent_runtime(nvidia_settings()) as runtime:
+            assert runtime.thread.is_alive()
+
+    asyncio.run(use_runtime())
+
+
+def test_runtime_builds_azure_responses_model_with_project_resources(monkeypatch):
     credential = FakeResource()
     project = FakeResource()
-    configured_client = FakeResource()
     calls = []
 
-    project.get_openai_client = lambda: SimpleNamespace(
-        with_options=lambda **kwargs: calls.append(("options", kwargs))
-        or configured_client
-    )
-
     def build_project(endpoint, credential):
-        calls.append(("project", endpoint, credential))
+        calls.append((endpoint, credential))
         return project
 
     monkeypatch.setattr(
@@ -92,15 +87,16 @@ def test_factory_builds_azure_client_with_browser_credential(monkeypatch):
         build_project,
     )
 
-    with open_provider_clients(azure_settings()) as provider:
-        assert provider.openai is configured_client
-        assert provider.azure_project is project
-        assert provider.azure_credential is credential
+    with open_agent_runtime(azure_settings()) as runtime:
+        client = runtime.openai
+        assert isinstance(runtime.model, OpenAIResponsesModel)
+        assert runtime.azure_project is project
+        assert runtime.azure_credential is credential
+        assert str(client.base_url).endswith("/api/projects/proj/openai/v1/")
+        assert client.max_retries == 0
+        assert runtime.model.settings["openai_reasoning_effort"] == "medium"
 
-    assert calls == [
-        ("project", azure_settings().azure_ai_project_endpoint, credential),
-        ("options", {"max_retries": 0}),
-    ]
-    assert configured_client.closed
+    assert calls == [(azure_settings().azure_ai_project_endpoint, credential)]
+    assert client.is_closed()
     assert project.closed
     assert credential.closed

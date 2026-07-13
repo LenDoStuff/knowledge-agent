@@ -26,6 +26,11 @@ def build_parser() -> argparse.ArgumentParser:
     input_group.add_argument("--pdf-path")
     input_group.add_argument("--folder-path")
     parser.add_argument(
+        "--knowledge-base",
+        choices=["custom", "lightrag"],
+        default="custom",
+    )
+    parser.add_argument(
         "--log-level",
         choices=["INFO", "DEBUG"],
         default="INFO",
@@ -43,6 +48,7 @@ def main() -> None:
         args.claim_id,
         claim_settings,
         llm_settings,
+        args.knowledge_base,
     ) as services:
         if args.pdf_path is not None:
             manifest = ingest_claim_pdf(

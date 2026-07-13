@@ -3,21 +3,21 @@ import logging
 from knowledge_agent.research.cli import build_parser, configure_logging
 
 
-def test_cli_uses_explicit_query_count_and_max_depth_names():
+def test_cli_uses_deep_agent_search_and_request_limits():
     args = build_parser().parse_args(
         [
             "--claim-path",
             "claim",
             "--question",
             "What happened?",
-            "--queries-per-question",
+            "--max-searches",
             "3",
-            "--max-depth",
-            "2",
+            "--request-limit",
+            "8",
         ]
     )
-    assert args.queries_per_question == 3
-    assert args.max_depth == 2
+    assert args.max_searches == 3
+    assert args.request_limit == 8
 
 
 def test_cli_logging_creates_fixed_file_and_appends(monkeypatch, tmp_path):

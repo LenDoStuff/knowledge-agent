@@ -114,19 +114,20 @@ def test_page_and_chunk_citation_fields_are_exact():
         )
 
 
-def test_manifest_requires_embedding_metadata_for_semantic_retrieval():
+@pytest.mark.parametrize("retrieval_mode", ["semantic", "lightrag"])
+def test_manifest_requires_embedding_metadata_for_embedding_retrieval(retrieval_mode):
     manifest = ClaimManifest.model_validate(
         {
             "claim_id": "CLM-001",
             "source_files": ["claim.pdf"],
             "documents": [],
             "chunk_count": 0,
-            "retrieval_mode": "semantic",
+            "retrieval_mode": retrieval_mode,
             "embedding_provider": "snowflake",
             "embedding_model": "test-embedding-model",
         }
     )
-    assert manifest.retrieval_mode == "semantic"
+    assert manifest.retrieval_mode == retrieval_mode
 
     with pytest.raises(ValidationError):
         ClaimManifest.model_validate(
@@ -135,6 +136,6 @@ def test_manifest_requires_embedding_metadata_for_semantic_retrieval():
                 "source_files": ["claim.pdf"],
                 "documents": [],
                 "chunk_count": 0,
-                "retrieval_mode": "semantic",
+                "retrieval_mode": retrieval_mode,
             }
         )

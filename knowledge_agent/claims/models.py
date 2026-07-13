@@ -8,7 +8,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
-RetrievalMode = Literal["lexical", "semantic"]
+RetrievalMode = Literal["lexical", "semantic", "lightrag"]
+KnowledgeBaseEngine = Literal["custom", "lightrag"]
 
 
 def utc_now() -> datetime:
@@ -154,11 +155,12 @@ class ClaimManifest(BaseModel):
 
     @model_validator(mode="after")
     def validate_retrieval_settings(self) -> "ClaimManifest":
-        if self.retrieval_mode == "semantic" and (
+        if self.retrieval_mode in {"semantic", "lightrag"} and (
             not self.embedding_provider or not self.embedding_model
         ):
             raise ValueError(
-                "semantic retrieval requires embedding_provider and embedding_model"
+                f"{self.retrieval_mode} retrieval requires embedding_provider "
+                "and embedding_model"
             )
         if self.retrieval_mode == "lexical" and (
             self.embedding_provider is not None or self.embedding_model is not None

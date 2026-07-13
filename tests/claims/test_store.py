@@ -1,6 +1,8 @@
 from pathlib import Path
 import shutil
 
+import pytest
+
 from knowledge_agent.claims.store import (
     get_document,
     get_page,
@@ -158,3 +160,17 @@ def test_semantic_store_queries_a_real_chroma_index(tmp_path):
 
     assert result.chunk_id == "DOC-002-CHUNK-001"
     assert result.source_ref == "CLM-SAMPLE-001/DOC-002#DOC-002-CHUNK-001"
+
+
+def test_lightrag_store_rejects_a_missing_index(tmp_path):
+    claim_path = tmp_path / "claim"
+    shutil.copytree(SAMPLE_OUTPUT, claim_path)
+    manifest_path = claim_path / "manifest.json"
+    lightrag = manifest_path.read_text(encoding="utf-8").replace(
+        '"retrieval_mode": "lexical",\n  "embedding_provider": null,\n  "embedding_model": null',
+        '"retrieval_mode": "lightrag",\n  "embedding_provider": "nvidia",\n  "embedding_model": "baai/bge-m3"',
+    )
+    manifest_path.write_text(lightrag, encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError, match="metadata"):
+        load_claim_store(claim_path)

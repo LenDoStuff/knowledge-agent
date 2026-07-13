@@ -23,8 +23,21 @@ def test_cli_accepts_exactly_one_ingestion_input():
     )
 
     assert pdf_args.pdf_path == "claim.pdf"
+    assert pdf_args.knowledge_base == "custom"
     assert folder_args.folder_path == "documents"
     assert folder_args.log_level == "DEBUG"
+
+    lightrag_args = parser.parse_args(
+        [
+            "--claim-id",
+            "CLM-002",
+            "--pdf-path",
+            "claim.pdf",
+            "--knowledge-base",
+            "lightrag",
+        ]
+    )
+    assert lightrag_args.knowledge_base == "lightrag"
 
     with pytest.raises(SystemExit):
         parser.parse_args(["--claim-id", "CLM-001"])

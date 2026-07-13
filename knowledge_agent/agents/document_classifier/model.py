@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from pydantic import BaseModel
+from pydantic_ai import Agent
 
 from knowledge_agent.agents.document_classifier.models import (
     DocumentClassification,
@@ -19,32 +20,49 @@ from knowledge_agent.agents.document_classifier.prompts import (
     build_page_boundary_prompt,
 )
 from knowledge_agent.claims.models import DocumentChunk, DocumentMetadata, PageText
-from knowledge_agent.llm.client import StructuredOutputParser
+from knowledge_agent.llm.providers import AgentRuntime
 
 
-ParsedModel = TypeVar("ParsedModel", bound=BaseModel)
 LOGGER = logging.getLogger(__name__)
+AGENT_RETRIES = {"tools": 1, "output": 1}
+ClassifierOutput = TypeVar("ClassifierOutput", bound=BaseModel)
+
+DOCUMENT_CLASSIFIER_AGENT = Agent(
+    name="document_classifier",
+    output_type=DocumentClassification,
+    retries=AGENT_RETRIES,
+)
+PAGE_BOUNDARY_AGENT = Agent(
+    name="page_boundary_classifier",
+    output_type=PageBoundaryDecision,
+    retries=AGENT_RETRIES,
+)
+DOCUMENT_METADATA_AGENT = Agent(
+    name="document_metadata_extractor",
+    output_type=ExtractedDocumentMetadata,
+    retries=AGENT_RETRIES,
+)
 
 
 def classify_document(
-    parse_structured_output: StructuredOutputParser,
+    runtime: AgentRuntime,
     file_name: str,
     pages: list[PageText],
 ) -> DocumentClassification:
     if not pages:
         raise ValueError(f"Document {file_name} has no OCR pages")
     system, user = build_classify_document_prompt(file_name, pages)
-    return _parse_classifier_output(
-        parse_structured_output,
+    return _run_classifier_agent(
+        runtime,
+        DOCUMENT_CLASSIFIER_AGENT,
         operation="classify_document",
         system=system,
         user=user,
-        response_model=DocumentClassification,
     )
 
 
 def classify_page_boundary(
-    parse_structured_output: StructuredOutputParser,
+    runtime: AgentRuntime,
     page: PageText,
     prior_page: PageText | None,
     current_document: LogicalDocument | None,
@@ -62,30 +80,30 @@ def classify_page_boundary(
         prior_page,
         current_document,
     )
-    decision = _parse_classifier_output(
-        parse_structured_output,
+    decision = _run_classifier_agent(
+        runtime,
+        PAGE_BOUNDARY_AGENT,
         operation="classify_page_boundary",
         system=system,
         user=user,
-        response_model=PageBoundaryDecision,
     )
     return decision.model_copy(update={"page_number": page.page_number})
 
 
 def extract_document_metadata(
-    parse_structured_output: StructuredOutputParser,
+    runtime: AgentRuntime,
     document: LogicalDocument,
     chunks: list[DocumentChunk],
 ) -> DocumentMetadata:
     if not chunks:
         raise ValueError(f"Document {document.id} has no chunks")
     system, user = build_extract_metadata_prompt(document, chunks)
-    extracted = _parse_classifier_output(
-        parse_structured_output,
+    extracted = _run_classifier_agent(
+        runtime,
+        DOCUMENT_METADATA_AGENT,
         operation="extract_document_metadata",
         system=system,
         user=user,
-        response_model=ExtractedDocumentMetadata,
     )
     valid_refs = {chunk.source_ref for chunk in chunks}
     for event in extracted.events:
@@ -108,27 +126,26 @@ def extract_document_metadata(
     )
 
 
-def _parse_classifier_output(
-    parse_structured_output: StructuredOutputParser,
+def _run_classifier_agent(
+    runtime: AgentRuntime,
+    agent: Agent[Any, ClassifierOutput],
     *,
     operation: str,
     system: str,
     user: str,
-    response_model: type[ParsedModel],
-) -> ParsedModel:
+) -> ClassifierOutput:
     LOGGER.debug(
-        "claim_classifier_prompt operation=%s response_model=%s "
-        "system=%r user=%r",
+        "claim_classifier_prompt operation=%s system=%r user=%r",
         operation,
-        response_model.__name__,
         system,
         user,
     )
-    parsed = parse_structured_output(system, user, response_model)
+    result = runtime.run(agent, user, instructions=system)
+    parsed = result.output
     LOGGER.debug(
-        "claim_classifier_output operation=%s response_model=%s output=%s",
+        "claim_classifier_output operation=%s output=%s usage=%s",
         operation,
-        response_model.__name__,
         parsed.model_dump_json(),
+        result.usage,
     )
     return parsed

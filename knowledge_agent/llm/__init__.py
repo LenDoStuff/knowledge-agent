@@ -1,1 +1,1 @@
-"""Shared LLM configuration and provider clients."""
+"""Shared PydanticAI provider configuration and runtime resources."""

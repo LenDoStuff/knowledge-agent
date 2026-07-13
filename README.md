@@ -9,15 +9,15 @@ searchable evidence and producing cited research answers.
 knowledge_agent/
   config.py
   agents/    # classifier/researcher prompts, models, tools, workflows
-  llm/       # provider configuration and structured-output calls
-  claims/    # ingestion, persistence, lexical/semantic retrieval
+  llm/       # PydanticAI provider configuration and runtime
+  claims/    # ingestion, persistence, custom/LightRAG retrieval
   research/  # research CLI
 ```
 
 AI behavior lives under `agents/`: the document classifier supports ingestion,
-and the claim researcher supports cited answers. The shared `llm` package
-contains provider setup only; claim and research prompts stay in their owning
-agent packages.
+and the Pydantic Deep Agents researcher supports cited answers. The shared
+`llm` package contains PydanticAI provider setup only; claim and research
+prompts stay in their owning agent packages.
 
 ## Runtime profiles
 
@@ -29,6 +29,11 @@ agent packages.
   Document Intelligence connection, Snowflake Cortex embeddings, and Chroma
   semantic retrieval.
 
+Either profile can instead build an embedded LightRAG knowledge base. LightRAG
+reuses the selected profile's LLM through PydanticAI; `api_key` uses NVIDIA
+`baai/bge-m3` embeddings and `azure_project` uses the configured Snowflake
+embedding model.
+
 Copy `.env.example` to `.env` and fill in the selected profile's values.
 
 ## Ingest a claim
@@ -36,7 +41,8 @@ Copy `.env.example` to `.env` and fill in the selected profile's values.
 ```powershell
 python -m knowledge_agent.claims.cli `
   --claim-id CLM-001 `
-  --folder-path examples/claims/sample_input
+  --folder-path examples/claims/sample_input `
+  --knowledge-base lightrag
 ```
 
 Use `--pdf-path` instead when one PDF contains several logical documents. Output
@@ -53,12 +59,12 @@ python -m knowledge_agent.research.cli `
 ```
 
 Research opens the retrieval strategy recorded in `manifest.json`: lexical
-claims remain fully local, while semantic claims create a Snowflake query
-embedder and read their claim-local Chroma index. Both paths return identical
-page IDs and `source_ref` citations to the research loop.
+claims remain fully local, semantic claims use Snowflake/Chroma, and LightRAG
+claims use their embedded graph and vector stores. All paths return identical
+page IDs and `source_ref` citations to the Pydantic Deep research loop.
 
 Research logs append to `logs/research.log`. `DEBUG` logging includes prompts,
-claim evidence, findings, and answers.
+claim-search evidence, native usage, and answers.
 
 ## Claim Research Workbench
 
@@ -73,9 +79,14 @@ Select an existing claim from `CLAIM_DATA_ROOT`, or ingest either one combined
 claim PDF or several already-separated document PDFs from the sidebar. The
 knowledge-base tab shows document metadata, parties, events, evidence chunks,
 OCR page text, an aggregate timeline, a claim-wide party list, and exact source
-references. The chat tab researches only the selected claim, keeps its
-conversation history for the current browser session, annotates answers with
-source tooltips, and exposes the agent's steps and retrieval tool calls.
+references. LightRAG claims also expose searchable entity and relationship
+tables. A protected rebuild action can switch engines from persisted chunks
+without rerunning OCR. The chat tab researches only the selected claim, keeps its
+independent report history under that claim, annotates answers with
+source tooltips, and exposes native retrieval tool calls and model usage.
+Planning mode clarifies scope and pauses for approval before searching. Reports,
+plans, native PydanticAI messages, streamed events, tool inputs/results, and
+usage persist under the claim for later audit in the Report history view.
 
 The app uses the active `KNOWLEDGE_AGENT_PROFILE` and the same `.env` provider
 configuration as the CLIs. Credentials remain server-side and are never entered

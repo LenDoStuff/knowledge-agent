@@ -6,6 +6,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from knowledge_agent.claims.embeddings import TextEmbedder
 from knowledge_agent.claims.errors import (
@@ -23,6 +24,9 @@ from knowledge_agent.claims.models import (
 )
 from knowledge_agent.claims.vector_store import VectorStore
 
+if TYPE_CHECKING:
+    from knowledge_agent.claims.lightrag import LightRagResource
+
 
 @dataclass(frozen=True)
 class ClaimStore:
@@ -36,6 +40,7 @@ class ClaimStore:
     chunks_by_id: dict[str, DocumentChunk]
     embedder: TextEmbedder | None = None
     vector_store: VectorStore | None = None
+    lightrag: LightRagResource | None = None
 
 
 def load_claim_store(
@@ -43,12 +48,17 @@ def load_claim_store(
     *,
     embedder: TextEmbedder | None = None,
     vector_store: VectorStore | None = None,
+    lightrag: LightRagResource | None = None,
 ) -> ClaimStore:
     output_path = Path(output_path)
     manifest_data = read_json(output_path / "manifest.json")
     if not isinstance(manifest_data, dict):
         raise ValueError("manifest.json must contain a JSON object")
     manifest = ClaimManifest.model_validate(manifest_data)
+    if manifest.retrieval_mode == "lightrag":
+        from knowledge_agent.claims.lightrag import validate_lightrag_index
+
+        validate_lightrag_index(output_path / "index" / "lightrag", manifest)
     pages = [
         PageText.model_validate(row)
         for row in read_jsonl(output_path / "pages.jsonl")
@@ -68,6 +78,7 @@ def load_claim_store(
         chunks_by_id={chunk.chunk_id: chunk for chunk in chunks},
         embedder=embedder,
         vector_store=vector_store,
+        lightrag=lightrag,
     )
     validate_claim_store(store)
     return store
@@ -85,6 +96,11 @@ def search_claim(
         raise ValueError("query must contain searchable text")
     if top_k < 1:
         raise ValueError("top_k must be at least 1")
+
+    if store.manifest.retrieval_mode == "lightrag":
+        raise RuntimeError(
+            "LightRAG retrieval is asynchronous; use search_claim_evidence"
+        )
 
     if store.manifest.retrieval_mode == "semantic":
         if store.embedder is None or store.vector_store is None:

@@ -12,25 +12,55 @@ from typing import Literal, Protocol, Sequence
 
 import streamlit as st
 from dotenv import load_dotenv
+from pydantic_ai import (
+    ModelMessage,
+    ToolCallPart,
+    ToolReturnPart,
+)
+from pydantic_core import to_jsonable_python
 
 from knowledge_agent.claims.config import ClaimSettings, load_claim_settings
 from knowledge_agent.claims.dependencies import (
     live_ingestion_services,
     open_claim_store,
+    rebuild_claim_knowledge_base,
 )
 from knowledge_agent.claims.errors import ChunkNotFoundError
 from knowledge_agent.claims.filesystem import claim_root, read_json, safe_claim_id
-from knowledge_agent.claims.models import ClaimManifest, DocumentChunk, DocumentMetadata
+from knowledge_agent.claims.lightrag import (
+    load_lightrag_graph,
+    load_lightrag_metadata,
+)
+from knowledge_agent.claims.models import (
+    ClaimManifest,
+    DocumentChunk,
+    DocumentMetadata,
+    KnowledgeBaseEngine,
+)
 from knowledge_agent.claims.pipeline import ingest_claim_folder, ingest_claim_pdf
 from knowledge_agent.claims.store import ClaimStore, get_document, get_page, load_claim_store
 from knowledge_agent.config import load_profile
-from knowledge_agent.llm.client import open_structured_output_parser
 from knowledge_agent.llm.config import LlmSettings, load_llm_settings
+from knowledge_agent.llm.providers import open_agent_runtime
 from knowledge_agent.agents.claim_researcher import (
-    ChatMessage,
-    ResearchAnswer,
-    ResearchStep,
+    ClaimResearchPlan,
+    ClaimResearchOutput,
+    ResearchClarification,
+    run_claim_planning,
     run_claim_research,
+)
+from knowledge_agent.research.history import (
+    TERMINAL_STATUSES,
+    ClarificationExchange,
+    InteractionUsage,
+    KnowledgeBaseSnapshot,
+    ResearchHistory,
+    ResearchInteraction,
+    clear_terminal_interactions,
+    delete_interaction,
+    load_research_history,
+    store_interaction,
+    utc_now,
 )
 
 
@@ -101,6 +131,7 @@ def ingest_uploads(
     uploads: Sequence[UploadedPdf],
     claim_settings: ClaimSettings,
     llm_settings: LlmSettings,
+    knowledge_base: KnowledgeBaseEngine = "custom",
 ) -> ClaimManifest:
     claim_id = safe_claim_id(claim_id)
     validate_uploads(mode, uploads)
@@ -123,6 +154,7 @@ def ingest_uploads(
                 claim_id,
                 claim_settings,
                 llm_settings,
+                knowledge_base,
             ) as services:
                 if mode == "combined":
                     return ingest_claim_pdf(
@@ -203,7 +235,7 @@ def main() -> None:
 
     knowledge_tab, chat_tab = st.tabs(["Knowledge base", "Research chat"])
     with knowledge_tab:
-        _render_knowledge_base(store)
+        _render_knowledge_base(selected, claim_settings, store)
     with chat_tab:
         _render_chat(selected, claim_settings, store)
 
@@ -246,6 +278,17 @@ def _render_sidebar(
 
 def _render_ingestion_form(claim_settings: ClaimSettings) -> None:
     claim_id = st.text_input("Claim ID", placeholder="CLM-001")
+    knowledge_base_label = st.radio(
+        "Knowledge base",
+        ["Custom", "LightRAG"],
+        help=(
+            "Custom uses the current lexical or Snowflake/Chroma index. "
+            "LightRAG builds a claim-local entity graph and vector index."
+        ),
+    )
+    knowledge_base: KnowledgeBaseEngine = (
+        "lightrag" if knowledge_base_label == "LightRAG" else "custom"
+    )
     mode_label = st.radio(
         "PDF layout",
         [SEPARATE_LABEL, COMBINED_LABEL],
@@ -277,6 +320,7 @@ def _render_ingestion_form(claim_settings: ClaimSettings) -> None:
                 upload_list,
                 claim_settings,
                 llm_settings,
+                knowledge_base,
             )
             status.update(label="Claim ingested", state="complete")
     except Exception as exc:
@@ -291,17 +335,20 @@ def _render_ingestion_form(claim_settings: ClaimSettings) -> None:
     st.rerun()
 
 
-def _render_knowledge_base(store: ClaimStore) -> None:
+def _render_knowledge_base(
+    entry: ClaimEntry,
+    claim_settings: ClaimSettings,
+    store: ClaimStore,
+) -> None:
     _render_claim_metrics(store)
+    _render_rebuild_knowledge_base(entry, claim_settings, store)
     if not store.documents:
         st.info("This claim has no documents.")
         return
 
     _render_claim_overview(store)
-    document = _select_document(store)
-    _render_document_metadata(document)
-    _render_document_chunks(store, document.id)
-    _render_document_pages(store, document)
+    if store.manifest.retrieval_mode == "lightrag":
+        _render_lightrag_graph(entry.path)
 
 
 def _render_claim_metrics(store: ClaimStore) -> None:
@@ -313,9 +360,130 @@ def _render_claim_metrics(store: ClaimStore) -> None:
     columns[3].metric("Retrieval", manifest.retrieval_mode)
 
 
+def _render_rebuild_knowledge_base(
+    entry: ClaimEntry,
+    claim_settings: ClaimSettings,
+    store: ClaimStore,
+) -> None:
+    try:
+        history = load_research_history(entry.path, entry.manifest.claim_id)
+        active = history.active_interaction()
+        history_error = None
+    except Exception as exc:
+        active = None
+        history_error = str(exc)
+
+    with st.expander("Rebuild knowledge base"):
+        st.caption(
+            "Rebuild from saved chunks without rerunning OCR or metadata extraction. "
+            "Saved research reports are not changed."
+        )
+        if history_error:
+            st.error(f"Could not validate active research: {history_error}")
+        if active is not None:
+            st.warning(
+                "Finish or cancel the active research interaction before rebuilding."
+            )
+        target_label = st.selectbox(
+            "Target engine",
+            ["Custom", "LightRAG"],
+            index=1 if store.manifest.retrieval_mode == "lightrag" else 0,
+            key=f"rebuild_engine_{entry.manifest.claim_id}",
+        )
+        disabled = active is not None or history_error is not None
+        if not st.button(
+            "Rebuild index",
+            key=f"rebuild_index_{entry.manifest.claim_id}",
+            disabled=disabled,
+            width="stretch",
+        ):
+            return
+        target: KnowledgeBaseEngine = (
+            "lightrag" if target_label == "LightRAG" else "custom"
+        )
+        try:
+            llm_settings = load_llm_settings(load_profile())
+            with st.status("Rebuilding knowledge base…", expanded=True) as status:
+                status.write("Indexing the persisted claim chunks.")
+                manifest = rebuild_claim_knowledge_base(
+                    entry.path,
+                    target,
+                    claim_settings,
+                    llm_settings,
+                )
+                status.update(label="Knowledge base rebuilt", state="complete")
+        except Exception as exc:
+            st.error(f"Knowledge base rebuild failed: {exc}")
+            return
+        st.session_state.claim_notice = (
+            f"Rebuilt {manifest.claim_id} with {manifest.retrieval_mode} retrieval."
+        )
+        st.rerun()
+
+
+def _render_lightrag_graph(claim_path: Path) -> None:
+    st.subheader("LightRAG graph")
+    try:
+        index_path = claim_path / "index" / "lightrag"
+        metadata = load_lightrag_metadata(index_path)
+        graph = load_lightrag_graph(index_path)
+    except Exception as exc:
+        st.error(f"Could not load the LightRAG graph: {exc}")
+        return
+
+    columns = st.columns(3)
+    columns[0].metric("Entities", metadata.entity_count)
+    columns[1].metric("Relationships", metadata.relationship_count)
+    columns[2].metric("Indexed chunks", metadata.indexed_chunk_count)
+    st.caption(
+        f"LightRAG {metadata.lightrag_version} · {metadata.llm_model} · "
+        f"{metadata.embedding_model}"
+    )
+    entity_tab, relationship_tab = st.tabs(["Entities", "Relationships"])
+    with entity_tab:
+        entity_filter = st.text_input(
+            "Filter entities",
+            key=f"entity_filter_{metadata.claim_id}",
+        )
+        _render_graph_table(graph.entities, entity_filter, "entities")
+    with relationship_tab:
+        relationship_filter = st.text_input(
+            "Filter relationships",
+            key=f"relationship_filter_{metadata.claim_id}",
+        )
+        _render_graph_table(
+            graph.relationships,
+            relationship_filter,
+            "relationships",
+        )
+
+
+def _render_graph_table(
+    rows: list[dict[str, object]],
+    filter_text: str,
+    label: str,
+) -> None:
+    needle = filter_text.strip().casefold()
+    filtered = [
+        row
+        for row in rows
+        if not needle
+        or needle in " ".join(str(value) for value in row.values()).casefold()
+    ]
+    displayed = filtered[:500]
+    if displayed:
+        st.dataframe(displayed, width="stretch", hide_index=True)
+    else:
+        st.caption(f"No {label} match this filter.")
+    if len(filtered) > len(displayed):
+        st.info(f"Showing 500 of {len(filtered)} matching {label}.")
+
+
 def _render_claim_overview(store: ClaimStore) -> None:
     st.subheader("Claim overview")
-    timeline_tab, parties_tab = st.tabs(["Timeline", "Parties"])
+    timeline_tab, parties_tab, documents_tab = st.tabs(
+        ["Timeline", "Parties", "Documents"]
+    )
     with timeline_tab:
         _render_timeline(store)
     with parties_tab:
@@ -324,43 +492,88 @@ def _render_claim_overview(store: ClaimStore) -> None:
             st.dataframe(parties, width="stretch", hide_index=True)
         else:
             st.caption("No parties were extracted from this claim.")
+    with documents_tab:
+        _render_documents(store)
+
+
+def _render_documents(store: ClaimStore) -> None:
+    st.markdown("#### Document inventory")
+    st.caption(
+        "Browse the claim file, compare extracted metadata, and inspect the "
+        "evidence behind each document."
+    )
+    st.dataframe(_document_rows(store), width="stretch", hide_index=True)
+
+    document = _select_document(store)
+    document_chunks = [
+        chunk for chunk in store.chunks if chunk.document_id == document.id
+    ]
+    page_range = _page_range_label(document)
+    columns = st.columns(3)
+    columns[0].metric("Selected document", document.id)
+    columns[1].metric("Pages", page_range)
+    columns[2].metric("Evidence chunks", len(document_chunks))
+
+    st.markdown(f"### {document.title}")
+    st.caption(
+        f"{document.document_type} · {document.file_name} · pages {page_range}"
+    )
+    metadata_tab, evidence_tab, pages_tab = st.tabs(
+        ["Metadata", "Evidence", "OCR pages"]
+    )
+    with metadata_tab:
+        _render_document_metadata(document)
+    with evidence_tab:
+        _render_document_chunks(store, document.id)
+    with pages_tab:
+        _render_document_pages(store, document)
+
+
+def _document_rows(store: ClaimStore) -> list[dict[str, str | int]]:
+    chunk_counts: dict[str, int] = {}
+    for chunk in store.chunks:
+        chunk_counts[chunk.document_id] = chunk_counts.get(chunk.document_id, 0) + 1
+    return [
+        {
+            "ID": document.id,
+            "Type": document.document_type,
+            "Title": document.title,
+            "Pages": _page_range_label(document),
+            "Parties": len(document.involved_parties),
+            "Events": len(document.events),
+            "Evidence chunks": chunk_counts.get(document.id, 0),
+            "File": document.file_name,
+        }
+        for document in store.documents
+    ]
+
+
+def _page_range_label(document: DocumentMetadata) -> str:
+    start = document.page_range.start_page
+    end = document.page_range.end_page
+    return str(start) if start == end else f"{start}–{end}"
 
 
 def _select_document(store: ClaimStore) -> DocumentMetadata:
-    st.subheader("Documents")
-    st.dataframe(
-        [
-            {
-                "ID": document.id,
-                "Type": document.document_type,
-                "Title": document.title,
-                "Pages": (
-                    f"{document.page_range.start_page}–{document.page_range.end_page}"
-                ),
-                "File": document.file_name,
-                "Summary": document.summary,
-            }
-            for document in store.documents
-        ],
-        width="stretch",
-        hide_index=True,
-    )
     selected_document_id = st.selectbox(
-        "Inspect document",
+        "Select a document to inspect",
         [document.id for document in store.documents],
         format_func=lambda document_id: (
             f"{document_id} — {get_document(store, document_id).title}"
         ),
+        key=f"document_select_{store.manifest.claim_id}",
     )
     return get_document(store, selected_document_id)
 
 
 def _render_document_metadata(document: DocumentMetadata) -> None:
-    st.markdown(f"**{document.title}**  \n{document.summary}")
+    with st.container(border=True):
+        st.markdown("##### Summary")
+        st.write(document.summary)
 
     parties_column, events_column = st.columns(2)
     with parties_column:
-        st.markdown("#### Involved parties")
+        st.markdown("##### Involved parties")
         if document.involved_parties:
             st.dataframe(
                 [party.model_dump() for party in document.involved_parties],
@@ -370,7 +583,7 @@ def _render_document_metadata(document: DocumentMetadata) -> None:
         else:
             st.caption("No parties extracted.")
     with events_column:
-        st.markdown("#### Events")
+        st.markdown("##### Events")
         if document.events:
             st.dataframe(
                 [event.model_dump() for event in document.events],
@@ -382,8 +595,12 @@ def _render_document_metadata(document: DocumentMetadata) -> None:
 
 
 def _render_document_chunks(store: ClaimStore, document_id: str) -> None:
-    st.subheader("Evidence chunks")
-    filter_text = st.text_input("Filter chunks", placeholder="Search text or source reference")
+    st.markdown("##### Evidence chunks")
+    filter_text = st.text_input(
+        "Filter chunks",
+        placeholder="Search text or source reference",
+        key=f"chunk_filter_{store.manifest.claim_id}_{document_id}",
+    )
     document_chunks = [
         chunk for chunk in store.chunks if chunk.document_id == document_id
     ]
@@ -410,8 +627,9 @@ def _render_document_chunks(store: ClaimStore, document_id: str) -> None:
             hide_index=True,
         )
         selected_ref = st.selectbox(
-            "Chunk text",
+            "Inspect chunk",
             [chunk.source_ref for chunk in document_chunks],
+            key=f"chunk_select_{store.manifest.claim_id}_{document_id}",
         )
         selected_chunk = _chunk_by_ref(document_chunks, selected_ref)
         st.code(selected_chunk.text, language=None, wrap_lines=True)
@@ -421,7 +639,7 @@ def _render_document_pages(
     store: ClaimStore,
     document: DocumentMetadata,
 ) -> None:
-    st.subheader("OCR pages")
+    st.markdown("##### OCR pages")
     pages = [
         page
         for page in store.pages
@@ -429,7 +647,11 @@ def _render_document_pages(
         <= page.page_number
         <= document.page_range.end_page
     ]
-    selected_page_id = st.selectbox("Page text", [page.page_id for page in pages])
+    selected_page_id = st.selectbox(
+        "Inspect page",
+        [page.page_id for page in pages],
+        key=f"page_select_{store.manifest.claim_id}_{document.id}",
+    )
     st.code(get_page(store, selected_page_id).text, language=None, wrap_lines=True)
 
 
@@ -439,99 +661,517 @@ def _render_chat(
     local_store: ClaimStore,
 ) -> None:
     claim_id = entry.manifest.claim_id
-    histories = st.session_state.setdefault("claim_chat_histories", {})
-    messages = histories.setdefault(claim_id, [])
-
-    header, action = st.columns([4, 1])
-    header.subheader(f"Research {claim_id}")
-    if action.button("Clear chat", key=f"clear_chat_{claim_id}", width="stretch"):
-        histories[claim_id] = []
-        st.rerun()
-
-    _render_chat_history(messages, local_store)
-
-    prompt = st.chat_input("Ask a question about this claim")
-    if not prompt:
+    try:
+        history = load_research_history(entry.path, claim_id)
+    except Exception as exc:
+        st.error(f"Could not load research history: {exc}")
         return
-    history = [
-        ChatMessage(role=message["role"], content=message["content"])
-        for message in messages
-    ]
-    messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
 
+    st.subheader(f"Research {claim_id}")
+    st.warning(
+        "Saved reports and audits contain conversation text, model messages, "
+        "and full claim evidence returned by tools."
+    )
+    new_tab, history_tab = st.tabs(["New research", "Report history"])
+    with new_tab:
+        _render_new_research(entry, claim_settings, local_store, history)
+    with history_tab:
+        _render_report_history(entry, local_store, history)
+
+
+def _render_new_research(
+    entry: ClaimEntry,
+    claim_settings: ClaimSettings,
+    store: ClaimStore,
+    history: ResearchHistory,
+) -> None:
+    claim_id = entry.manifest.claim_id
+    planning_column, audit_column = st.columns(2)
+    planning_enabled = planning_column.toggle(
+        "Planning",
+        value=True,
+        key=f"research_planning_{claim_id}",
+        help="Clarify scope and require approval before searching.",
+    )
+    show_live_audit = audit_column.toggle(
+        "Show live audit",
+        value=False,
+        key=f"research_live_audit_{claim_id}",
+    )
+
+    active = history.active_interaction()
+    if active is not None:
+        _render_active_interaction(
+            entry,
+            claim_settings,
+            store,
+            active,
+            show_live_audit,
+        )
+        return
+
+    prompt = st.chat_input(
+        "Ask a question about this claim",
+        key=f"new_research_prompt_{claim_id}",
+    )
+    if not prompt:
+        st.caption("Each submitted question starts an independent research context.")
+        return
     if _is_greeting(prompt):
-        greeting = "Hi! Ask me a question about the selected claim."
-        messages.append({"role": "assistant", "content": greeting})
-        with st.chat_message("assistant"):
-            st.markdown(greeting)
-        st.rerun()
+        st.info("Ask a specific question about the selected claim.")
+        return
 
     try:
-        profile = load_profile()
-        llm_settings = load_llm_settings(profile)
-        with st.chat_message("assistant"):
-            with st.status("Researching the claim…", expanded=True) as status:
-                st.write("Planning searches, gathering evidence, and checking gaps.")
-
-                def show_step(step: ResearchStep) -> None:
-                    status.write(step.message)
-
-                with (
-                    open_structured_output_parser(llm_settings) as parse_structured_output,
-                    open_claim_store(entry.path, claim_settings) as store,
-                ):
-                    answer = run_claim_research(
-                        store=store,
-                        question=prompt,
-                        parse_structured_output=parse_structured_output,
-                        history=history,
-                        on_step=show_step,
-                    )
-                status.update(label="Research complete", state="complete")
-            _render_cited_answer(answer, local_store)
-            _render_research_details(answer, local_store)
+        knowledge_base = _knowledge_base_snapshot(entry)
     except Exception as exc:
-        st.error(str(exc))
+        st.error(f"Could not validate the selected knowledge base: {exc}")
         return
 
-    messages.append(
-        {
-            "role": "assistant",
-            "content": answer.answer,
-            "research": answer.model_dump(mode="json"),
-        }
+    interaction = ResearchInteraction(
+        claim_id=claim_id,
+        status="planning" if planning_enabled else "researching",
+        question=prompt.strip(),
+        planning_enabled=planning_enabled,
+        knowledge_base=knowledge_base,
     )
+    store_interaction(entry.path, interaction)
+    if planning_enabled:
+        _run_planning_phase(entry, store, interaction, prompt)
+    else:
+        _run_research_phase(entry, claim_settings, interaction, prompt)
     st.rerun()
 
 
-def _render_chat_history(
-    messages: Sequence[dict[str, object]],
+def _render_active_interaction(
+    entry: ClaimEntry,
+    claim_settings: ClaimSettings,
     store: ClaimStore,
+    interaction: ResearchInteraction,
+    show_live_audit: bool,
 ) -> None:
-    for message in messages:
-        role = str(message["role"])
-        with st.chat_message(role):
-            if message["role"] == "assistant" and "research" in message:
-                try:
-                    answer = ResearchAnswer.model_validate(message["research"])
-                    _render_cited_answer(answer, store)
-                    _render_research_details(answer, store)
-                except Exception as exc:
-                    st.error(f"Could not display saved research answer: {exc}")
+    with st.chat_message("user"):
+        st.markdown(interaction.question)
+    _render_knowledge_base_snapshot(interaction.knowledge_base)
+    for exchange in interaction.clarifications:
+        with st.chat_message("assistant"):
+            st.markdown(exchange.question)
+            st.caption(exchange.reason)
+        if exchange.answer is not None:
+            with st.chat_message("user"):
+                st.markdown(exchange.answer)
+
+    if interaction.status == "awaiting_clarification":
+        answer = st.chat_input(
+            "Answer the clarification question",
+            key=f"clarification_{interaction.id}",
+        )
+        if answer:
+            pending = interaction.clarifications[-1]
+            interaction.clarifications[-1] = ClarificationExchange(
+                question=pending.question,
+                reason=pending.reason,
+                answer=answer.strip(),
+            )
+            interaction.status = "planning"
+            interaction.updated_at = utc_now()
+            store_interaction(entry.path, interaction)
+            _run_planning_phase(entry, store, interaction, answer)
+            st.rerun()
+    elif interaction.status == "awaiting_approval":
+        st.markdown("### Proposed research plan")
+        _render_plan(interaction.plan)
+        approve, cancel = st.columns(2)
+        if approve.button(
+            "Approve and run",
+            key=f"approve_{interaction.id}",
+            type="primary",
+            width="stretch",
+        ):
+            interaction.status = "researching"
+            interaction.updated_at = utc_now()
+            store_interaction(entry.path, interaction)
+            _run_research_phase(
+                entry,
+                claim_settings,
+                interaction,
+                "The proposed research plan is approved. Execute it and produce the report.",
+            )
+            st.rerun()
+        if cancel.button(
+            "Cancel",
+            key=f"cancel_{interaction.id}",
+            width="stretch",
+        ):
+            interaction.status = "cancelled"
+            interaction.updated_at = utc_now()
+            store_interaction(entry.path, interaction)
+            st.rerun()
+    elif interaction.status in {"planning", "researching"}:
+        st.warning(
+            "This interaction was interrupted while an agent call was running. "
+            "Retry it or cancel it."
+        )
+        retry, cancel = st.columns(2)
+        if retry.button("Retry", key=f"retry_{interaction.id}", width="stretch"):
+            if interaction.status == "planning":
+                prompt = (
+                    interaction.clarifications[-1].answer
+                    if interaction.clarifications
+                    else interaction.question
+                )
+                _run_planning_phase(entry, store, interaction, prompt or interaction.question)
             else:
-                st.markdown(str(message["content"]))
+                prompt = (
+                    "The proposed research plan is approved. Execute it and produce "
+                    "the report."
+                    if interaction.plan is not None
+                    else interaction.question
+                )
+                _run_research_phase(entry, claim_settings, interaction, prompt)
+            st.rerun()
+        if cancel.button(
+            "Cancel",
+            key=f"cancel_interrupted_{interaction.id}",
+            width="stretch",
+        ):
+            interaction.status = "cancelled"
+            interaction.updated_at = utc_now()
+            store_interaction(entry.path, interaction)
+            st.rerun()
+
+    if show_live_audit:
+        _render_native_audit(interaction.agent_messages, interaction.audit_events)
 
 
-def _render_cited_answer(answer: ResearchAnswer, store: ClaimStore) -> None:
+def _run_planning_phase(
+    entry: ClaimEntry,
+    store: ClaimStore,
+    interaction: ResearchInteraction,
+    prompt: str,
+) -> None:
+    remaining_requests = 4 - interaction.planning_usage.requests
+    if remaining_requests < 1:
+        _fail_interaction(entry.path, interaction, "planning request limit of 4 exceeded")
+        return
+    events: list[dict[str, object]] = []
+    try:
+        settings = load_llm_settings(load_profile())
+        with st.status("Planning the research…", expanded=True) as status:
+            status.write("Verifying the question and its scope.")
+            with open_agent_runtime(settings) as runtime:
+                result = run_claim_planning(
+                    runtime,
+                    store,
+                    prompt,
+                    message_history=interaction.agent_messages,
+                    clarification_round=len(interaction.clarifications),
+                    request_limit=remaining_requests,
+                    on_event=_audit_callback(events, "planning"),
+                )
+            _write_event_status(status, events)
+            status.update(label="Planning step complete", state="complete")
+        interaction.agent_messages += result.new_messages()
+        interaction.audit_events.extend(events)
+        interaction.planning_usage = interaction.planning_usage.plus(
+            _interaction_usage(result.usage)
+        )
+        if isinstance(result.output, ResearchClarification):
+            interaction.clarifications.append(
+                ClarificationExchange(
+                    question=result.output.question,
+                    reason=result.output.reason,
+                )
+            )
+            interaction.status = "awaiting_clarification"
+        else:
+            interaction.plan = result.output
+            interaction.status = "awaiting_approval"
+        interaction.updated_at = utc_now()
+        store_interaction(entry.path, interaction)
+    except Exception as exc:
+        interaction.audit_events.extend(events)
+        _fail_interaction(entry.path, interaction, str(exc) or exc.__class__.__name__)
+
+
+def _run_research_phase(
+    entry: ClaimEntry,
+    claim_settings: ClaimSettings,
+    interaction: ResearchInteraction,
+    prompt: str,
+) -> None:
+    events: list[dict[str, object]] = []
+    try:
+        settings = load_llm_settings(load_profile())
+        with st.status("Researching the claim…", expanded=True) as status:
+            status.write("Searching the selected claim and preparing the report.")
+            with (
+                open_agent_runtime(settings) as runtime,
+                open_claim_store(
+                    entry.path,
+                    claim_settings,
+                    runtime=runtime,
+                    llm_settings=settings,
+                ) as store,
+            ):
+                result = run_claim_research(
+                    runtime,
+                    store,
+                    prompt,
+                    message_history=interaction.agent_messages,
+                    approved_plan=interaction.plan,
+                    on_event=_audit_callback(events, "research"),
+                )
+            _write_event_status(status, events)
+            status.update(label="Research complete", state="complete")
+        interaction.agent_messages += result.new_messages()
+        interaction.audit_events.extend(events)
+        interaction.research_usage = interaction.research_usage.plus(
+            _interaction_usage(result.usage)
+        )
+        interaction.output = result.output
+        interaction.status = "completed"
+        interaction.updated_at = utc_now()
+        store_interaction(entry.path, interaction)
+    except Exception as exc:
+        interaction.audit_events.extend(events)
+        _fail_interaction(entry.path, interaction, str(exc) or exc.__class__.__name__)
+
+
+def _audit_callback(events: list[dict[str, object]], phase: str):
+    def capture(event: object) -> None:
+        events.append(
+            {
+                "phase": phase,
+                "type": event.__class__.__name__,
+                "payload": to_jsonable_python(event),
+            }
+        )
+
+    return capture
+
+
+def _write_event_status(status, events: Sequence[dict[str, object]]) -> None:
+    for event in events:
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        part = payload.get("part")
+        if not isinstance(part, dict) or part.get("tool_name") != "claim_search":
+            continue
+        if event.get("type") == "FunctionToolCallEvent":
+            status.write(f"Searched claim evidence: {_tool_query(part.get('args'))}")
+        elif event.get("type") == "FunctionToolResultEvent":
+            status.write(
+                "Claim search returned "
+                f"{len(_tool_source_refs(part.get('content')))} chunks."
+            )
+
+
+def _fail_interaction(
+    claim_path: Path,
+    interaction: ResearchInteraction,
+    error: str,
+) -> None:
+    interaction.error = error
+    interaction.status = "failed"
+    interaction.updated_at = utc_now()
+    store_interaction(claim_path, interaction)
+
+
+def _interaction_usage(usage: object) -> InteractionUsage:
+    return InteractionUsage(**_usage_payload(usage))
+
+
+def _knowledge_base_snapshot(entry: ClaimEntry) -> KnowledgeBaseSnapshot:
+    manifest = entry.manifest
+    if manifest.retrieval_mode != "lightrag":
+        return KnowledgeBaseSnapshot(
+            retrieval_mode=manifest.retrieval_mode,
+            embedding_provider=manifest.embedding_provider,
+            embedding_model=manifest.embedding_model,
+        )
+    metadata = load_lightrag_metadata(entry.path / "index" / "lightrag")
+    if metadata.claim_id != manifest.claim_id:
+        raise ValueError("LightRAG metadata claim_id does not match the claim")
+    return KnowledgeBaseSnapshot(
+        retrieval_mode=manifest.retrieval_mode,
+        embedding_provider=manifest.embedding_provider,
+        embedding_model=manifest.embedding_model,
+        lightrag_version=metadata.lightrag_version,
+        lightrag_index_claim_id=metadata.claim_id,
+        lightrag_index_llm_provider=metadata.llm_provider,
+        lightrag_index_llm_model=metadata.llm_model,
+        lightrag_embedding_dimension=metadata.embedding_dimension,
+        lightrag_embedding_max_tokens=metadata.embedding_max_tokens,
+        lightrag_query_mode=metadata.query_mode,
+        lightrag_indexed_chunk_count=metadata.indexed_chunk_count,
+        lightrag_entity_count=metadata.entity_count,
+        lightrag_relationship_count=metadata.relationship_count,
+        lightrag_indexing_usage=InteractionUsage(
+            **metadata.indexing_usage.model_dump()
+        ),
+        lightrag_index_created_at=metadata.created_at,
+    )
+
+
+def _render_knowledge_base_snapshot(
+    snapshot: KnowledgeBaseSnapshot | None,
+) -> None:
+    if snapshot is None:
+        st.caption("Knowledge base: engine not recorded")
+        return
+    details = [snapshot.retrieval_mode]
+    if snapshot.embedding_model:
+        details.append(snapshot.embedding_model)
+    if snapshot.lightrag_version:
+        details.append(f"LightRAG {snapshot.lightrag_version}")
+    if snapshot.lightrag_index_llm_model:
+        details.append(f"indexed by {snapshot.lightrag_index_llm_model}")
+    if snapshot.lightrag_index_created_at:
+        details.append(
+            "index "
+            + snapshot.lightrag_index_created_at.astimezone().strftime(
+                "%Y-%m-%d %H:%M"
+            )
+        )
+    st.caption("Knowledge base: " + " · ".join(details))
+    with st.expander("Knowledge base snapshot"):
+        st.json(snapshot.model_dump(mode="json", exclude_none=True))
+
+
+def _render_plan(plan: ClaimResearchPlan | None) -> None:
+    if plan is None:
+        st.error("The saved interaction has no research plan.")
+        return
+    with st.container(border=True):
+        st.markdown(f"**Objective:** {plan.objective}")
+        st.markdown(f"**Scope:** {plan.understood_scope}")
+        if plan.assumptions:
+            st.markdown("**Assumptions**")
+            for assumption in plan.assumptions:
+                st.markdown(f"- {assumption}")
+        st.markdown("**Planned searches**")
+        for index, search in enumerate(plan.searches, start=1):
+            st.markdown(f"{index}. `{search.query}` — {search.research_goal}")
+        st.markdown("**Completion criteria**")
+        for criterion in plan.completion_criteria:
+            st.markdown(f"- {criterion}")
+
+
+def _render_report_history(
+    entry: ClaimEntry,
+    store: ClaimStore,
+    history: ResearchHistory,
+) -> None:
+    if not history.interactions:
+        st.info("No saved research interactions for this claim.")
+        return
+    interactions = sorted(
+        history.interactions,
+        key=lambda item: item.created_at,
+        reverse=True,
+    )
+    by_id = {item.id: item for item in interactions}
+    selected_id = st.selectbox(
+        "Saved interaction",
+        list(by_id),
+        format_func=lambda interaction_id: _interaction_label(by_id[interaction_id]),
+        key=f"history_select_{entry.manifest.claim_id}",
+    )
+    interaction = by_id[selected_id]
+    st.caption(
+        f"Status: {interaction.status} · Created: "
+        f"{interaction.created_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+    st.markdown(f"### {interaction.question}")
+    _render_knowledge_base_snapshot(interaction.knowledge_base)
+    if interaction.clarifications:
+        with st.expander(f"Clarifications ({len(interaction.clarifications)})"):
+            for exchange in interaction.clarifications:
+                st.markdown(f"**Agent:** {exchange.question}")
+                st.markdown(f"**User:** {exchange.answer or '(unanswered)'}")
+    if interaction.plan is not None:
+        st.markdown("### Approved plan")
+        _render_plan(interaction.plan)
+    if interaction.output is not None:
+        st.markdown("### Report")
+        try:
+            _render_cited_answer(interaction.output, store)
+            _render_research_details(
+                interaction.output,
+                interaction.agent_messages,
+                interaction.usage.model_dump(),
+                store,
+            )
+        except Exception as exc:
+            st.error(f"Could not display saved research report: {exc}")
+    if interaction.error:
+        st.error(interaction.error)
+    if interaction.status == "cancelled":
+        st.info("This interaction was cancelled before a report was produced.")
+    _render_native_audit(interaction.agent_messages, interaction.audit_events)
+
+    delete_column, clear_column = st.columns(2)
+    terminal = interaction.status in TERMINAL_STATUSES
+    if delete_column.button(
+        "Delete selected",
+        key=f"delete_{interaction.id}",
+        disabled=not terminal,
+        width="stretch",
+    ):
+        delete_interaction(entry.path, entry.manifest.claim_id, interaction.id)
+        st.rerun()
+    has_terminal = any(item.status in TERMINAL_STATUSES for item in interactions)
+    if clear_column.button(
+        "Clear terminal history",
+        key=f"clear_history_{entry.manifest.claim_id}",
+        disabled=not has_terminal,
+        width="stretch",
+    ):
+        clear_terminal_interactions(entry.path, entry.manifest.claim_id)
+        st.rerun()
+
+
+def _interaction_label(interaction: ResearchInteraction) -> str:
+    question = _excerpt(interaction.question, 70)
+    return (
+        f"{interaction.created_at.astimezone().strftime('%Y-%m-%d %H:%M')} · "
+        f"{interaction.status} · {question}"
+    )
+
+
+def _render_native_audit(
+    agent_messages: Sequence[ModelMessage],
+    events: Sequence[dict[str, object]],
+) -> None:
+    with st.expander(
+        f"Audit trail ({len(agent_messages)} messages · {len(events)} events)"
+    ):
+        if not agent_messages and not events:
+            st.caption("No agent activity was captured before the run stopped.")
+            return
+        for index, message in enumerate(agent_messages, start=1):
+            st.markdown(f"**Message {index} · `{message.__class__.__name__}`**")
+            st.json(to_jsonable_python(message))
+        if events:
+            st.markdown("**Streamed events**")
+            for event in events:
+                st.json(event)
+
+
+def _render_cited_answer(answer: ClaimResearchOutput, store: ClaimStore) -> None:
     st.markdown(
         _cited_answer_html(answer.answer, answer.source_refs, store),
         unsafe_allow_html=True,
     )
 
 
-def _render_research_details(answer: ResearchAnswer, store: ClaimStore) -> None:
+def _render_research_details(
+    answer: ClaimResearchOutput,
+    agent_messages: Sequence[ModelMessage],
+    usage: dict[str, int],
+    store: ClaimStore,
+) -> None:
     if answer.source_refs:
         with st.expander(f"Sources ({len(answer.source_refs)})"):
             for index, source_ref in enumerate(answer.source_refs, start=1):
@@ -542,50 +1182,79 @@ def _render_research_details(answer: ResearchAnswer, store: ClaimStore) -> None:
                     f"{source_ref} · pages {', '.join(chunk.page_ids)}"
                 )
                 st.write(_excerpt(chunk.text, 500))
+    searches = _claim_search_trace(agent_messages)
     with st.expander(
-        f"Agent steps ({len(answer.steps)}) · tool calls ({len(answer.searches)})"
+        f"Agent trace ({len(searches)} claim searches · "
+        f"{usage['requests']} model requests)"
     ):
-        st.markdown("**Execution steps**")
-        for index, step in enumerate(answer.steps, start=1):
-            st.markdown(f"{index}. `{step.stage}` — {step.message}")
-
         st.markdown("**Tool calls**")
-        if not answer.searches:
+        if not searches:
             st.caption("No retrieval tools were called.")
-        for index, search in enumerate(answer.searches, start=1):
+        for index, search in enumerate(searches, start=1):
             st.code(
-                f'{index}. claim_search(query="{search.query.query}")',
+                f'{index}. claim_search(query="{search["query"]}")',
                 language=None,
             )
             st.caption(
-                f"Goal: {search.query.research_goal} · "
-                f"returned {len(search.source_refs)} chunks"
+                f"Goal: {search['research_goal']} · "
+                f"returned {len(search['source_refs'])} chunks"
             )
+        st.markdown("**Usage**")
+        st.caption(
+            f"{usage['requests']} model requests · {usage['tool_calls']} tool calls · "
+            f"{usage['input_tokens']} input tokens · "
+            f"{usage['output_tokens']} output tokens"
+        )
 
-        if answer.gap_reviews:
-            st.markdown("**Gap reviews**")
-            for review in answer.gap_reviews:
-                label = "complete" if review.complete else "more research needed"
-                st.markdown(
-                    f"- **{label}:** "
-                    f"{len(review.missing_information)} gaps, "
-                    f"{len(review.queries)} follow-up queries"
-                )
 
-        st.markdown("**Objectives**")
-        for objective in answer.plan.objectives:
-            st.markdown(f"- {objective}")
-        st.markdown("**Searches**")
-        for search in answer.searches:
-            st.markdown(
-                f"- `{search.query.query}` — {search.query.research_goal} "
-                f"({len(search.source_refs)} hits)"
-            )
-        st.markdown("**Validated findings**")
-        if not answer.findings:
-            st.caption("No supported findings were extracted.")
-        for finding in answer.findings:
-            st.markdown(f"- {finding.insight}")
+def _claim_search_trace(
+    messages: Sequence[ModelMessage],
+) -> list[dict[str, object]]:
+    searches: list[dict[str, object]] = []
+    by_call_id: dict[str, dict[str, object]] = {}
+    for message in messages:
+        for part in message.parts:
+            if isinstance(part, ToolCallPart) and part.tool_name == "claim_search":
+                args = part.args_as_dict()
+                record = {
+                    "query": str(args.get("query", "")),
+                    "research_goal": str(args.get("research_goal", "")),
+                    "source_refs": [],
+                }
+                searches.append(record)
+                by_call_id[part.tool_call_id] = record
+            elif isinstance(part, ToolReturnPart) and part.tool_name == "claim_search":
+                record = by_call_id.get(part.tool_call_id)
+                if record is not None:
+                    record["source_refs"] = _tool_source_refs(part.content)
+    return searches
+
+
+def _tool_query(args: object) -> str:
+    if isinstance(args, dict):
+        return str(args.get("query", ""))
+    return str(args)
+
+
+def _tool_source_refs(content: object) -> list[str]:
+    if not isinstance(content, list):
+        return []
+    refs: list[str] = []
+    for item in content:
+        if isinstance(item, dict) and item.get("source_ref"):
+            refs.append(str(item["source_ref"]))
+        elif hasattr(item, "source_ref"):
+            refs.append(str(item.source_ref))
+    return refs
+
+
+def _usage_payload(usage: object) -> dict[str, int]:
+    return {
+        "requests": int(getattr(usage, "requests", 0)),
+        "tool_calls": int(getattr(usage, "tool_calls", 0)),
+        "input_tokens": int(getattr(usage, "input_tokens", 0)),
+        "output_tokens": int(getattr(usage, "output_tokens", 0)),
+    }
 
 
 def _render_timeline(store: ClaimStore) -> None:

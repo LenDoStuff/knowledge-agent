@@ -4,11 +4,12 @@ from pathlib import Path
 import pytest
 from dotenv import load_dotenv
 from pydantic import BaseModel
+from pydantic_ai import Agent
 
 from knowledge_agent.claims.store import load_claim_store
 from knowledge_agent.agents.claim_researcher import run_claim_research
-from knowledge_agent.llm.client import open_structured_output_parser
 from knowledge_agent.llm.config import LlmSettings
+from knowledge_agent.llm.providers import open_agent_runtime
 
 
 load_dotenv()
@@ -24,14 +25,18 @@ class CityAnswer(BaseModel):
 
 
 def assert_city_contract(settings: LlmSettings) -> None:
-    with open_structured_output_parser(settings) as parse_structured_output:
-        result = parse_structured_output(
-            "Return the requested city and country.",
+    agent = Agent(
+        output_type=CityAnswer,
+        instructions="Return the requested city and country.",
+        retries={"tools": 1, "output": 1},
+    )
+    with open_agent_runtime(settings) as runtime:
+        result = runtime.run(
+            agent,
             "Give the capital of France and its country.",
-            CityAnswer,
         )
-    assert result.city.casefold() == "paris"
-    assert result.country.casefold() == "france"
+    assert result.output.city.casefold() == "paris"
+    assert result.output.country.casefold() == "france"
 
 
 @pytest.mark.live_nvidia
@@ -88,21 +93,45 @@ def test_azure_structured_output_contract():
     reason="set RUN_AZURE_CONTRACT_TEST=1 to run the Azure golden evaluation",
 )
 def test_azure_research_golden_dataset():
+    assert_research_golden(azure_settings())
+
+
+def assert_research_golden(settings: LlmSettings) -> None:
     import json
 
     cases = json.loads(GOLDEN_DATASET.read_text(encoding="utf-8"))
-    settings = azure_settings()
-    with open_structured_output_parser(settings) as parse_structured_output:
+    with open_agent_runtime(settings) as runtime:
         store = load_claim_store(SAMPLE_OUTPUT)
         for case in cases:
-            answer = run_claim_research(
+            result = run_claim_research(
+                runtime=runtime,
                 store=store,
                 question=case["question"],
-                parse_structured_output=parse_structured_output,
-                queries_per_question=1,
-                max_depth=1,
                 top_k=2,
             )
-            assert set(case["required_source_refs"]).issubset(answer.source_refs)
-            answer_text = answer.answer.casefold()
+            assert set(case["required_source_refs"]).issubset(
+                result.output.source_refs
+            )
+            answer_text = result.output.answer.casefold()
             assert all(term in answer_text for term in case["required_terms"])
+
+
+@pytest.mark.live_nvidia
+@pytest.mark.skipif(
+    os.getenv("RUN_NVIDIA_CONTRACT_TEST") != "1",
+    reason="set RUN_NVIDIA_CONTRACT_TEST=1 to run NVIDIA research evaluation",
+)
+def test_nvidia_research_golden_dataset():
+    api_key = os.getenv("nvidia_api_key_ds4")
+    base_url = os.getenv("nvidia_base_url")
+    if not api_key or not base_url:
+        pytest.fail("NVIDIA credentials are required")
+    assert_research_golden(
+        LlmSettings(
+            profile="api_key",
+            model="deepseek-ai/deepseek-v4-pro",
+            reasoning_effort="medium",
+            nvidia_base_url=base_url,
+            nvidia_api_key_ds4=api_key,
+        )
+    )

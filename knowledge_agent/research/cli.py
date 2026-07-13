@@ -9,8 +9,8 @@ from pathlib import Path
 from knowledge_agent.claims.config import load_claim_settings
 from knowledge_agent.claims.dependencies import open_claim_store
 from knowledge_agent.config import load_profile
-from knowledge_agent.llm.client import open_structured_output_parser
 from knowledge_agent.llm.config import load_llm_settings
+from knowledge_agent.llm.providers import open_agent_runtime
 from knowledge_agent.agents.claim_researcher import run_claim_research
 
 
@@ -24,8 +24,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--claim-path", required=True)
     parser.add_argument("--question", required=True)
-    parser.add_argument("--queries-per-question", type=int, default=4)
-    parser.add_argument("--max-depth", type=int, default=2)
+    parser.add_argument("--max-searches", type=int, default=6)
+    parser.add_argument("--request-limit", type=int, default=10)
     parser.add_argument("--top-k", type=int, default=8)
     parser.add_argument(
         "--log-level",
@@ -42,22 +42,32 @@ def main() -> None:
     llm_settings = load_llm_settings(profile)
     claim_settings = load_claim_settings()
     with (
-        open_structured_output_parser(llm_settings) as parse_structured_output,
-        open_claim_store(args.claim_path, claim_settings) as store,
+        open_agent_runtime(llm_settings) as runtime,
+        open_claim_store(
+            args.claim_path,
+            claim_settings,
+            runtime=runtime,
+            llm_settings=llm_settings,
+        ) as store,
     ):
-        answer = run_claim_research(
+        result = run_claim_research(
+            runtime=runtime,
             store=store,
             question=args.question,
-            parse_structured_output=parse_structured_output,
-            queries_per_question=args.queries_per_question,
-            max_depth=args.max_depth,
+            max_searches=args.max_searches,
+            request_limit=args.request_limit,
             top_k=args.top_k,
         )
 
-    print(answer.answer)
+    print(result.output.answer)
     print("\nSources:")
-    for source_ref in answer.source_refs:
+    for source_ref in result.output.source_refs:
         print(f"- {source_ref}")
+    usage = result.usage
+    print(
+        f"\nUsage: {usage.requests} model requests, "
+        f"{usage.tool_calls} tool calls, {usage.total_tokens} tokens"
+    )
 
 
 def configure_logging(level: str) -> None:

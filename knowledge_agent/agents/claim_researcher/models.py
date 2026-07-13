@@ -1,33 +1,13 @@
-"""Structured inputs, state summaries, and outputs for claim research."""
+"""Structured claim-search evidence and final research output."""
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated
 
-from pydantic import (
-    BaseModel,
-    Field,
-    StringConstraints,
-    model_validator,
-)
+from pydantic import BaseModel, Field, StringConstraints, model_validator
 
 
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
-
-
-class ChatMessage(BaseModel):
-    role: Literal["user", "assistant"]
-    content: NonEmptyText
-
-
-class ResearchQuery(BaseModel):
-    query: NonEmptyText
-    research_goal: NonEmptyText
-
-
-class ResearchPlan(BaseModel):
-    objectives: list[NonEmptyText] = Field(min_length=1)
-    queries: list[ResearchQuery] = Field(min_length=1)
 
 
 class EvidenceItem(BaseModel):
@@ -39,53 +19,31 @@ class EvidenceItem(BaseModel):
     text: str
 
 
-class ResearchFinding(BaseModel):
-    insight: NonEmptyText
-    source_refs: list[NonEmptyText] = Field(min_length=1)
-
-
-class GapReview(BaseModel):
-    complete: bool
-    missing_information: list[NonEmptyText] = Field(default_factory=list)
-    queries: list[ResearchQuery] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def complete_review_has_no_queries(self) -> "GapReview":
-        if self.complete and self.queries:
-            raise ValueError("a complete gap review cannot include more queries")
-        return self
-
-
-class ResearchSearch(BaseModel):
-    query: ResearchQuery
-    source_refs: list[NonEmptyText] = Field(default_factory=list)
-
-
-class ResearchStep(BaseModel):
-    stage: Literal["plan", "tool", "gap_review", "validation", "answer"]
-    message: NonEmptyText
-    tool_name: str | None = None
-    query: str | None = None
-    source_refs: list[NonEmptyText] = Field(default_factory=list)
-
-
-class DraftAnswer(BaseModel):
-    answer: NonEmptyText
-    source_refs: list[NonEmptyText] = Field(default_factory=list)
-
-
-class ResearchAnswer(BaseModel):
+class ResearchClarification(BaseModel):
     question: NonEmptyText
+    reason: NonEmptyText
+
+
+class ResearchPlanStep(BaseModel):
+    query: NonEmptyText
+    research_goal: NonEmptyText
+
+
+class ClaimResearchPlan(BaseModel):
+    objective: NonEmptyText
+    understood_scope: NonEmptyText
+    assumptions: list[NonEmptyText] = Field(default_factory=list)
+    searches: list[ResearchPlanStep] = Field(min_length=1)
+    completion_criteria: list[NonEmptyText] = Field(min_length=1)
+
+
+class ClaimResearchOutput(BaseModel):
     answer: NonEmptyText
-    plan: ResearchPlan
-    searches: list[ResearchSearch]
-    gap_reviews: list[GapReview] = Field(default_factory=list)
-    steps: list[ResearchStep] = Field(default_factory=list)
-    findings: list[ResearchFinding]
-    source_refs: list[NonEmptyText]
+    source_refs: list[NonEmptyText] = Field(default_factory=list)
+    evidence_sufficient: bool
 
     @model_validator(mode="after")
-    def require_sources_for_findings(self) -> "ResearchAnswer":
-        if self.findings and not self.source_refs:
-            raise ValueError("an answer with factual findings requires source_refs")
+    def insufficient_output_has_no_sources(self) -> "ClaimResearchOutput":
+        if not self.evidence_sufficient and self.source_refs:
+            raise ValueError("insufficient-evidence output cannot declare sources")
         return self

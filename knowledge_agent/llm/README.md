@@ -1,37 +1,33 @@
 # LLM
 
-The LLM package is the shared provider boundary. It loads model settings,
-constructs synchronous provider clients, and exposes one structured-output
-interface for the agent packages.
+This package is the shared PydanticAI provider boundary. It loads model
+settings and owns the async model client behind a synchronous application API.
 
 ## Main entry points
 
 - `load_llm_settings(profile)` reads the active provider settings.
-- `llm_provider(settings)` returns the concrete provider name.
-- `parse_structured_output(settings, client, system, user, response_model)`
-  parses one structured response into a validated Pydantic model.
-- `open_structured_output_parser(settings)` opens the configured provider
-  client and yields the parser callable used by agent functions.
+- `open_agent_runtime(settings)` yields an `AgentRuntime` with one PydanticAI
+  model, one `AsyncOpenAI` client, and one persistent event loop hosted on its
+  own thread so synchronous callers remain safe inside hosts such as Streamlit.
+- `AgentRuntime.run(agent, prompt, ...)` returns the native PydanticAI
+  `AgentRunResult`.
+- `AgentRuntime.run_coroutine(...)` runs embedded async resources such as
+  LightRAG initialization, indexing, and shutdown on that same loop.
 
 ## Providers
 
-The `api_key` profile uses NVIDIA DeepSeek V4 Pro through NVIDIA's
-OpenAI-compatible endpoint:
+- `api_key` uses `OpenAIChatModel` against NVIDIA's OpenAI-compatible endpoint
+  with DeepSeek V4 Pro in deterministic non-thinking mode.
+- `azure_project` uses `OpenAIResponsesModel` against the Foundry project
+  endpoint with browser authentication and the configured reasoning effort.
 
-- `nvidia_base_url`
-- `nvidia_api_key_ds4`
-- model: `deepseek-ai/deepseek-v4-pro`
-
-NVIDIA structured output is requested through chat completions. The system
-prompt is extended with the target JSON schema, and the request sets
-`response_mode` to `json_object`.
-
-The `azure_project` profile uses the Azure AI Project OpenAI client and the
-Responses structured-output parser.
+HTTP retries and fallback models are disabled. PydanticAI agents may use one
+explicit validation retry for malformed structured output or tool arguments.
+LightRAG's indexing and keyword prompts are adapted to named PydanticAI agents;
+it never creates a second raw text-generation client.
 
 ## Constraints
 
-Keep this package provider-focused. Claim-specific prompts, research strategy,
-document metadata rules, and retrieval behavior belong in `agents/` or
-`claims/`. Provider failures should surface as `LlmError`; do not add hidden
-retries or fallback providers.
+Keep this package provider-focused. Claim prompts, tools, citation validation,
+and retrieval behavior belong in `agents/` or `claims/`. The runtime owns and
+closes its async client on the same event loop used for every agent request.

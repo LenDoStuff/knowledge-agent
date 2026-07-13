@@ -56,6 +56,13 @@ def write_json(path: Path, data: object) -> None:
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+def write_json_atomic(path: Path, data: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    temporary_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    temporary_path.replace(path)
+
+
 def read_json(path: Path) -> object:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -80,7 +87,7 @@ def read_jsonl(path: Path) -> list[dict]:
 
 
 def write_claim_manifest(root: Path, manifest: ClaimManifest) -> None:
-    write_json(root / "manifest.json", manifest.model_dump(mode="json"))
+    write_json_atomic(root / "manifest.json", manifest.model_dump(mode="json"))
 
 
 def slugify(value: str) -> str:

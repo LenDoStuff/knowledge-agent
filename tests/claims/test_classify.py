@@ -1,4 +1,11 @@
+import asyncio
 import logging
+from contextlib import contextmanager
+from typing import Any, cast
+
+import pytest
+from pydantic_ai import ModelResponse, ToolCallPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from knowledge_agent.agents.document_classifier import (
     DocumentClassification,
@@ -9,173 +16,157 @@ from knowledge_agent.agents.document_classifier import (
     classify_page_boundary,
     extract_document_metadata,
 )
-from knowledge_agent.claims.models import (
-    DocumentChunk,
-    PageRange,
-    PageText,
-)
+from knowledge_agent.claims.models import DocumentChunk, PageRange, PageText
+from knowledge_agent.llm.providers import AgentRuntime
 
 
-def build_parser(parsed_outputs):
-    queued_outputs = list(parsed_outputs)
-    calls = []
-
-    def parse(system, user, response_model):
-        calls.append((system, user, response_model))
-        return queued_outputs.pop(0)
-
-    return parse, calls
-
-
-def test_classify_complete_document_uses_responses_structured_parse(caplog):
-    parse, calls = build_parser(
-        [
-            DocumentClassification(
-                title="Repair Invoice",
-                document_type="invoice",
-            )
-        ]
-    )
-
-    with caplog.at_level(
-        logging.DEBUG,
-        logger="knowledge_agent.agents.document_classifier.model",
-    ):
-        result = classify_document(
-            parse,
-            "repair_invoice.pdf",
-            [
-                PageText(
-                    claim_id="CLM-001",
-                    page_number=1,
-                    page_id="CLM-001:p1",
-                    text="Repair Invoice\nTotal: 850.00",
-                )
-            ],
+@contextmanager
+def output_runtime(output, observed):
+    def model_function(messages, info: AgentInfo):
+        observed.append((messages, info))
+        return ModelResponse(
+            parts=[ToolCallPart(info.output_tools[0].name, output.model_dump())]
         )
 
-    system, user, response_model = calls[0]
-    assert response_model is DocumentClassification
-    assert "repair_invoice.pdf" in user
-    assert "Repair Invoice" in user
-    assert "json" not in (system + user).lower()
+    runner = asyncio.Runner()
+    try:
+        yield AgentRuntime(
+            model=FunctionModel(model_function),
+            runner=runner,
+            openai=cast(Any, None),
+        )
+    finally:
+        runner.close()
+
+
+def _prompt_text(messages) -> str:
+    return "\n".join(
+        str(getattr(part, "content", ""))
+        for message in messages
+        for part in message.parts
+    )
+
+
+def test_classify_complete_document_uses_pydantic_agent(caplog):
+    observed = []
+    output = DocumentClassification(
+        title="Repair Invoice",
+        document_type="invoice",
+    )
+    with output_runtime(output, observed) as runtime:
+        with caplog.at_level(
+            logging.DEBUG,
+            logger="knowledge_agent.agents.document_classifier.model",
+        ):
+            result = classify_document(
+                runtime,
+                "repair_invoice.pdf",
+                [
+                    PageText(
+                        claim_id="CLM-001",
+                        page_number=1,
+                        page_id="CLM-001:p1",
+                        text="Repair Invoice\nTotal: 850.00",
+                    )
+                ],
+            )
+
+    messages, info = observed[0]
+    prompt = _prompt_text(messages)
+    assert info.output_tools[0].name == "final_result"
+    assert "repair_invoice.pdf" in prompt
+    assert "Repair Invoice" in prompt
     assert result.document_type == "invoice"
     assert "claim_classifier_prompt operation=classify_document" in caplog.text
-    assert "Repair Invoice" in caplog.text
     assert "claim_classifier_output operation=classify_document" in caplog.text
 
 
-def test_classify_page_boundary_uses_responses_structured_parse():
-    parse, calls = build_parser(
-        [
-            PageBoundaryDecision(
-                page_number=999,
-                is_new_document=True,
-                document_type="invoice",
-                title="Repair Invoice",
-            )
-        ]
-    )
+def test_classify_document_rejects_empty_pages():
+    with pytest.raises(ValueError, match="has no OCR pages"):
+        classify_document(cast(AgentRuntime, None), "empty.pdf", [])
 
-    decision = classify_page_boundary(
-        parse,
-        page=PageText(
-            claim_id="CLM-001",
-            page_number=2,
-            page_id="CLM-001:p2",
-            text="Repair Invoice\nTotal: 850.00",
-        ),
-        prior_page=PageText(
-            claim_id="CLM-001",
-            page_number=1,
-            page_id="CLM-001:p1",
-            text="First Notice of Loss",
-        ),
-        current_document=LogicalDocument(
-            id="DOC-001",
-            title="First Notice of Loss",
-            document_type="fnol",
-            page_range=PageRange(start_page=1, end_page=1),
-            pages=[],
-        ),
-    )
 
-    system, user, response_model = calls[0]
-    prompt_text = system + "\n" + user
-    assert response_model is PageBoundaryDecision
-    assert "json" not in prompt_text.lower()
+def test_classify_page_boundary_uses_structured_agent_output():
+    observed = []
+    output = PageBoundaryDecision(
+        page_number=999,
+        is_new_document=True,
+        document_type="invoice",
+        title="Repair Invoice",
+    )
+    with output_runtime(output, observed) as runtime:
+        decision = classify_page_boundary(
+            runtime,
+            page=PageText(
+                claim_id="CLM-001",
+                page_number=2,
+                page_id="CLM-001:p2",
+                text="Repair Invoice\nTotal: 850.00",
+            ),
+            prior_page=PageText(
+                claim_id="CLM-001",
+                page_number=1,
+                page_id="CLM-001:p1",
+                text="First Notice of Loss",
+            ),
+            current_document=LogicalDocument(
+                id="DOC-001",
+                title="First Notice of Loss",
+                document_type="fnol",
+                page_range=PageRange(start_page=1, end_page=1),
+                pages=[],
+            ),
+        )
+
     assert decision.page_number == 2
     assert decision.document_type == "invoice"
+    assert "Repair Invoice" in _prompt_text(observed[0][0])
 
 
-def test_extract_document_metadata_uses_responses_structured_parse():
-    parse, calls = build_parser(
-        [
-            ExtractedDocumentMetadata(
-                title="Repair Invoice",
-                summary="Invoice for sample repair work.",
-                involved_parties=[
-                    {"name": "Sample Body Shop", "role": "repair vendor"},
-                ],
-                events=[
-                    {
-                        "year": 2026,
-                        "month": 6,
-                        "day": None,
-                        "sentence": "Sample Body Shop listed repair work.",
-                        "source_ref": "CLM-001/DOC-002#DOC-002-CHUNK-001",
-                    },
-                ],
-                document_type="invoice",
-            )
-        ]
+def test_extract_document_metadata_validates_exact_event_sources():
+    source_ref = "CLM-001/DOC-002#DOC-002-CHUNK-001"
+    output = ExtractedDocumentMetadata(
+        title="Repair Invoice",
+        summary="Invoice for sample repair work.",
+        involved_parties=[{"name": "Sample Body Shop", "role": "repair vendor"}],
+        events=[
+            {
+                "year": 2026,
+                "month": 6,
+                "day": None,
+                "sentence": "Sample Body Shop listed repair work.",
+                "source_ref": source_ref,
+            }
+        ],
+        document_type="invoice",
     )
     document = LogicalDocument(
         id="DOC-002",
         title="Invoice",
         document_type="unknown",
         page_range=PageRange(start_page=2, end_page=2),
-        pages=[
-            PageText(
-                claim_id="CLM-001",
-                page_number=2,
-                page_id="CLM-001:p2",
-                text="Repair Invoice\nVendor: Sample Body Shop",
-            )
-        ],
+        pages=[],
         file_name="DOC-002_invoice.pdf",
     )
-
-    chunks = [
-        DocumentChunk(
-            claim_id="CLM-001",
-            document_id="DOC-002",
-            chunk_id="DOC-002-CHUNK-001",
-            source_ref="CLM-001/DOC-002#DOC-002-CHUNK-001",
-            chunk_index=0,
-            document_type="unknown",
-            page_range=PageRange(start_page=2, end_page=2),
-            page_ids=["CLM-001:p2"],
-            text="Repair Invoice\nVendor: Sample Body Shop",
-        )
-    ]
-
-    metadata = extract_document_metadata(parse, document, chunks)
-
-    system, user, response_model = calls[0]
-    prompt_text = system + "\n" + user
-    assert response_model is ExtractedDocumentMetadata
-    assert "json" not in prompt_text.lower()
-    assert "summary of no more than 200 words" in prompt_text
-    assert (
-        response_model.model_json_schema()["properties"]["summary"]["description"]
-        == "A concise summary of no more than 200 words."
+    chunk = DocumentChunk(
+        claim_id="CLM-001",
+        document_id="DOC-002",
+        chunk_id="DOC-002-CHUNK-001",
+        source_ref=source_ref,
+        chunk_index=0,
+        document_type="unknown",
+        page_range=PageRange(start_page=2, end_page=2),
+        page_ids=["CLM-001:p2"],
+        text="Repair Invoice",
     )
+
+    with output_runtime(output, []) as runtime:
+        metadata = extract_document_metadata(runtime, document, [chunk])
     assert metadata.id == "DOC-002"
-    assert metadata.page_range == PageRange(start_page=2, end_page=2)
-    assert metadata.file_name == "DOC-002_invoice.pdf"
-    assert metadata.involved_parties[0].role == "repair vendor"
-    assert metadata.events[0].year == 2026
-    assert metadata.events[0].month == 6
-    assert metadata.events[0].day is None
-    assert metadata.events[0].source_ref == chunks[0].source_ref
+    assert metadata.events[0].source_ref == source_ref
+
+    invalid = output.model_copy(deep=True)
+    invalid.events[0].source_ref += ":p2"
+    with output_runtime(invalid, []) as runtime:
+        with pytest.raises(ValueError, match="not a chunk"):
+            extract_document_metadata(runtime, document, [chunk])

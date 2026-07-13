@@ -18,12 +18,16 @@ manifest.json
 pages.jsonl
 chunks.jsonl
 run_log.json
+research/history.json  # Streamlit planning, reports, and full audit history
 index/chroma/          # semantic claims only
+index/lightrag/        # LightRAG graph/vector/KV stores and metadata
 ```
 
-`manifest.json` records `retrieval_mode` as `lexical` or `semantic`. Semantic
-manifests also record the Snowflake embedding provider and model. Embedding
-vectors live only in Chroma; they are not duplicated in `chunks.jsonl`.
+`manifest.json` records `retrieval_mode` as `lexical`, `semantic`, or
+`lightrag`. Semantic and LightRAG manifests record their embedding provider and
+model. Embeddings are not duplicated in `chunks.jsonl`.
+`research/history.json` is created only after a research interaction is started
+and can contain full retrieved claim evidence.
 
 ## CLI
 
@@ -35,11 +39,14 @@ python -m knowledge_agent.claims.cli `
 python -m knowledge_agent.claims.cli `
   --claim-id CLM-002 `
   --folder-path examples/claims/sample_input `
+  --knowledge-base lightrag `
   --log-level DEBUG
 ```
 
-The `api_key` profile produces lexical claims. The `azure_project` profile uses
-Snowflake Cortex `AI_EMBED` and writes a claim-local Chroma index.
+`--knowledge-base custom` is the default: `api_key` produces lexical claims and
+`azure_project` produces Snowflake/Chroma semantic claims. `--knowledge-base
+lightrag` builds an embedded claim-local LightRAG index using the existing
+provider credentials. Indexing performs additional LLM and embedding calls.
 
 Claims append logs to `logs/claims.log`. `INFO` records OCR counts, ingestion
 steps, LLM request IDs, token usage, and latency. `DEBUG` additionally records
@@ -67,7 +74,9 @@ profile = load_profile()
 claim_settings = load_claim_settings()
 llm_settings = load_llm_settings(profile)
 
-with live_ingestion_services("CLM-001", claim_settings, llm_settings) as services:
+with live_ingestion_services(
+    "CLM-001", claim_settings, llm_settings, "lightrag"
+) as services:
     manifest = ingest_claim_pdf(
         "CLM-001",
         Path("claim.pdf"),
@@ -76,7 +85,17 @@ with live_ingestion_services("CLM-001", claim_settings, llm_settings) as service
     )
 ```
 
-Use the same store interface for both retrieval modes:
+Lexical and semantic stores retain the synchronous `search_claim` interface.
+LightRAG research uses the asynchronous evidence adapter and requires the same
+`AgentRuntime` used by the Pydantic Deep agent. Missing indexes or mismatched
+embedding settings fail explicitly; there is no custom-retrieval fallback.
+
+`rebuild_claim_knowledge_base(...)` atomically switches an existing claim
+between custom and LightRAG retrieval from `chunks.jsonl`. Documents, citations,
+and research history are preserved if the new index succeeds, and the previous
+index remains active if rebuilding fails.
+
+Custom store example:
 
 ```python
 from knowledge_agent.claims.config import load_claim_settings

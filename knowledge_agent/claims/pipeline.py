@@ -63,6 +63,9 @@ class IngestionServices:
     embedder: TextEmbedder | None
     vector_store_factory: Callable[[Path], VectorStore] | None
     retrieval_mode: RetrievalMode
+    lightrag_indexer: Callable[[Path, list[DocumentChunk]], object] | None = None
+    embedding_provider: str | None = None
+    embedding_model: str | None = None
 
 
 class IngestionLogEntry(BaseModel):
@@ -294,6 +297,11 @@ def _complete_ingestion(
             raise ValueError("semantic retrieval requires a vector store factory")
         with log_step(log, "index", root):
             _index_chunks(root, chunks, embeddings, vector_store_factory)
+    elif services.retrieval_mode == "lightrag":
+        if services.lightrag_indexer is None:
+            raise ValueError("LightRAG retrieval requires an indexer")
+        with log_step(log, "lightrag_index", root):
+            services.lightrag_indexer(root / "index" / "lightrag", chunks)
     else:
         with log_step(log, "clear_vector_index", root):
             _clear_vector_index(root)
@@ -385,17 +393,19 @@ def _build_manifest(
     services: IngestionServices,
 ) -> ClaimManifest:
     embedder = services.embedder
-    is_semantic = services.retrieval_mode == "semantic"
+    uses_embeddings = services.retrieval_mode in {"semantic", "lightrag"}
     return ClaimManifest(
         claim_id=claim_id,
         source_files=[path.relative_to(root).as_posix() for path in source_files],
         documents=documents,
         chunk_count=chunk_count,
         embedding_provider=(
-            embedder.embedding_provider if is_semantic and embedder else None
+            services.embedding_provider
+            or (embedder.embedding_provider if uses_embeddings and embedder else None)
         ),
         embedding_model=(
-            embedder.embedding_model if is_semantic and embedder else None
+            services.embedding_model
+            or (embedder.embedding_model if uses_embeddings and embedder else None)
         ),
         retrieval_mode=services.retrieval_mode,
     )

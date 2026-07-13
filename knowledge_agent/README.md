@@ -12,9 +12,9 @@ used for classification and cited research.
 - `app.py` is the Streamlit workbench for upload, ingestion, claim inspection,
   and research chat.
 - `agents/` owns AI prompts, structured contracts, tools, validation, and
-  workflow code.
+  PydanticAI agent code.
 - `claims/` owns persisted claim knowledge bases.
-- `llm/` owns provider setup and structured-output requests.
+- `llm/` owns PydanticAI provider setup and runtime resources.
 - `research/` owns the research CLI.
 
 Dependencies should stay straightforward: agent packages may use `claims` and
@@ -25,13 +25,20 @@ should not know about claim or research behavior.
 
 The active deployment profile comes from `KNOWLEDGE_AGENT_PROFILE`:
 
-- `api_key` uses NVIDIA DeepSeek V4 Pro for structured LLM calls and lexical
+- `api_key` uses NVIDIA DeepSeek V4 Pro through PydanticAI and lexical custom
   retrieval for claims.
-- `azure_project` uses Azure AI Projects, Azure Document Intelligence,
+- `azure_project` uses PydanticAI with Azure AI Projects, Document Intelligence,
   Snowflake Cortex embeddings, and Chroma semantic retrieval.
+
+Both profiles can select embedded LightRAG instead of the custom engine. It
+indexes the existing claim chunks, keeps citation IDs stable, and returns
+structured evidence to the same Pydantic Deep researcher.
 
 The Streamlit app and CLIs use the same `.env`-driven configuration. Keep
 credentials server-side; the UI should not ask users to paste secrets.
 Research answers render only when every citation resolves to evidence in the
 selected claim. Missing or stale citation references surface as explicit UI
-errors instead of partially rendered answers.
+errors instead of partially rendered answers. Claim documents are grouped into
+inventory, metadata, evidence, and OCR views. Full research audit data is always
+persisted, and the UI warns that native PydanticAI messages and events can
+contain full claim and conversation text.

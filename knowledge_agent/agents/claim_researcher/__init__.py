@@ -1,41 +1,23 @@
-"""Claim researcher agent for grounded answers over persisted claims."""
+"""Claim-scoped deep research agent."""
 
-from knowledge_agent.agents.claim_researcher.llm import (
-    FindingSet,
-    extract_findings,
-    plan_research,
-    review_gaps,
-    write_answer,
-)
 from knowledge_agent.agents.claim_researcher.models import (
-    ChatMessage,
-    DraftAnswer,
+    ClaimResearchPlan,
+    ClaimResearchOutput,
     EvidenceItem,
-    GapReview,
-    ResearchAnswer,
-    ResearchFinding,
-    ResearchPlan,
-    ResearchQuery,
-    ResearchSearch,
-    ResearchStep,
+    ResearchClarification,
+    ResearchPlanStep,
 )
-from knowledge_agent.agents.claim_researcher.workflow import run_claim_research
+from knowledge_agent.agents.claim_researcher.workflow import (
+    run_claim_planning,
+    run_claim_research,
+)
 
 __all__ = [
-    "ChatMessage",
-    "DraftAnswer",
+    "ClaimResearchPlan",
+    "ClaimResearchOutput",
     "EvidenceItem",
-    "FindingSet",
-    "GapReview",
-    "ResearchAnswer",
-    "ResearchFinding",
-    "ResearchPlan",
-    "ResearchQuery",
-    "ResearchSearch",
-    "ResearchStep",
-    "extract_findings",
-    "plan_research",
-    "review_gaps",
+    "ResearchClarification",
+    "ResearchPlanStep",
+    "run_claim_planning",
     "run_claim_research",
-    "write_answer",
 ]

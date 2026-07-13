@@ -23,16 +23,18 @@ chunk and its source pages.
 
 ### Cited claim research
 
-Users can ask questions about one stored claim. The research result plans
-claim-local searches, gathers evidence, produces supported findings, and
-returns a concise answer with citations. Research reads the claim knowledge
-base; it does not change the claim artifacts.
+Users can ask questions about one stored claim. A bounded deep agent plans with
+todos, iterates over claim-local searches, and returns a concise answer with
+validated citations. Streamlit planning mode can clarify scope, pause for plan
+approval, and then resume the same native model context. Each submitted question
+is independent from earlier reports.
 
 ### Retrieval
 
-Claims support either lexical retrieval over the stored text or semantic
-retrieval over a claim-local index. Both modes return the same evidence shape:
-document details, page IDs, chunk text, score, and stable source references.
+Claims support lexical retrieval over stored text, semantic retrieval over a
+claim-local Chroma index, or embedded LightRAG retrieval over a claim-local
+entity graph and vector index. All modes return the same citation-bearing chunk
+evidence to the research agent. LightRAG never generates the final report.
 
 ## Claim knowledge-base layout
 
@@ -47,7 +49,9 @@ by default).
   pages.jsonl            # OCR text, one page per line
   chunks.jsonl           # retrievable evidence, one chunk per line
   run_log.json           # ingestion status and timing
+  research/history.json  # plans, reports, native messages, audit, and usage
   index/chroma/          # semantic retrieval only
+  index/lightrag/        # LightRAG graph, vectors, KV data, and metadata
 ```
 
 `claim_id` identifies the claim directory and must be non-empty. It cannot be
@@ -104,8 +108,8 @@ files, and holds the document metadata used for inspection and research.
 | `source_files` | Relative paths to the preserved input or document PDFs. |
 | `documents` | Ordered logical-document metadata records. |
 | `chunk_count` | Total number of records in `chunks.jsonl`. |
-| `retrieval_mode` | `lexical` or `semantic`. |
-| `embedding_provider`, `embedding_model` | Present for semantic claims; `null` for lexical claims. |
+| `retrieval_mode` | `lexical`, `semantic`, or `lightrag`. |
+| `embedding_provider`, `embedding_model` | Present for semantic and LightRAG claims; `null` for lexical claims. |
 | `created_at` | UTC creation timestamp. |
 
 Each entry in `documents` contains:
@@ -189,7 +193,7 @@ Example line:
 ```
 
 The `source_ref` is the durable bridge between metadata events, search results,
-research findings, and citations in the final answer.
+and citations in the final answer.
 
 ### `index/chroma/` (semantic claims only)
 
@@ -201,6 +205,22 @@ whether it is required and `chunks.jsonl` for the portable evidence records.
 The index associates vectors and retrieval metadata with `chunk_id` values. It
 is absent for lexical claims, whose retrieval relies on `chunks.jsonl` and
 `manifest.json` only.
+
+### `index/lightrag/` (LightRAG claims only)
+
+**Purpose:** keep the embedded LightRAG JSON KV, NanoVectorDB, NetworkX graph,
+document-status data, LLM cache, and index metadata for one claim.
+
+`metadata.json` records the LightRAG version, indexing LLM, embedding
+provider/model/dimension/context, indexed chunk count, graph counts, indexing
+usage, and creation time. Each claim chunk is inserted with its stable
+`source_ref` as document ID and its `chunk_id` as the retrieval file path.
+Unknown paths returned by LightRAG fail the search rather than producing a
+partial result.
+
+The index can be rebuilt atomically from `chunks.jsonl`. A successful rebuild
+replaces only the retrieval index and manifest retrieval fields. A failed
+rebuild leaves the previous engine intact.
 
 ### `run_log.json`
 
@@ -219,24 +239,22 @@ Each entry has `step`, `status`, `message`, `started_at`, and `finished_at`.
 `status` is recorded as `running`, `succeeded`, or `failed`; a failed entry
 includes the surfaced error in `message`.
 
-### Research answer (transient result)
+### Research answer and audit history
 
 **Purpose:** represent the answer to one question over one claim, together with
 the evidence trail that supports it.
 
-This result is returned to the caller and may be retained for the current chat
-session, but it is not written into the claim directory. Its important fields
-are:
+This result is returned to the caller and Streamlit persists it in
+`research/history.json` together with its plan, native messages, tool evidence,
+usage, and knowledge-base snapshot. Its important fields are:
 
 | Field | Meaning |
 | --- | --- |
-| `question`, `answer` | The submitted question and the rendered answer text. |
+| `answer` | The rendered answer text. |
 | `source_refs` | Exact source references declared by the answer. |
-| `plan` | Research objectives and planned queries. |
-| `searches` | Executed queries and the source references they returned. |
-| `findings` | Supported insights with their evidence references. |
-| `gap_reviews` | Evidence-coverage reviews and any follow-up queries. |
-| `steps` | Human-readable research and validation progress. |
+| `evidence_sufficient` | Whether retrieved claim evidence supports an answer. |
+| Native messages | PydanticAI model/tool messages used for chat history and traces. |
+| Native usage | Model-request, tool-call, and token totals for the turn. |
 
 Factual statements in `answer` use square-bracket citations, for example:
 
@@ -267,10 +285,11 @@ PDF sources
 
 chunks.jsonl
   -> index/chroma/ when retrieval_mode is semantic
+  -> index/lightrag/ when retrieval_mode is lightrag
 
 manifest events + chunks
   -> source_ref citations
-  -> transient research answer
+  -> persisted cited research reports
 
 ingestion activity
   -> run_log.json and operational logs

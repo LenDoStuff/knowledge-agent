@@ -1,21 +1,15 @@
 # Document Classifier Agent
 
-This package contains the LLM-assisted document classifier used by claim
-ingestion.
+This package contains the PydanticAI structured agents used by claim ingestion.
 
 ## Main entry points
 
-- `classify_document(...)`, `classify_page_boundary(...)`, and
-  `extract_document_metadata(...)` are plain functions that receive an
-  explicit structured-output parser callable.
+- `classify_document(runtime, ...)` classifies an already-separated PDF.
+- `classify_page_boundary(runtime, ...)` detects logical-document boundaries.
+- `extract_document_metadata(runtime, ...)` extracts validated claim metadata.
 - `LogicalDocument`, `PageBoundaryDecision`, `DocumentClassification`, and
-  `ExtractedDocumentMetadata` define the structured model contracts.
+  `ExtractedDocumentMetadata` define the structured output contracts.
 
-## Responsibilities
-
-- Classify already-separated uploaded PDFs.
-- Decide page boundaries for a combined scanned claim PDF.
-- Extract document metadata from claim chunks.
-
-The metadata prompt must keep summaries to no more than 200 words. Prompt text
-should stay here; provider-specific JSON mode belongs in `llm/`.
+The metadata prompt limits summaries to 200 words. Extracted event references
+must exactly match chunks from the same logical document. Provider setup and
+model transport remain in `knowledge_agent.llm`.

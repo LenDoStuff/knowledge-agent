@@ -1,14 +1,26 @@
 import shutil
+import json
 from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+import networkx as nx
+from pydantic_ai import (
+    ModelRequest,
+    ModelResponse,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
+from pydantic_core import to_jsonable_python
 from streamlit.testing.v1 import AppTest
 
 from knowledge_agent.app import (
     COMBINED_LABEL,
     SEPARATE_LABEL,
+    _claim_search_trace,
     _cited_answer_html,
+    _document_rows,
     _is_greeting,
     _party_rows,
     _timeline_rows,
@@ -18,13 +30,27 @@ from knowledge_agent.app import (
 )
 from knowledge_agent.claims.config import ClaimSettings
 from knowledge_agent.claims.errors import ChunkNotFoundError
+from knowledge_agent.claims.lightrag import GRAPH_FILE, METADATA_FILE, LightRagIndexMetadata
 from knowledge_agent.claims.store import load_claim_store
 from knowledge_agent.llm.config import LlmSettings
+from knowledge_agent.research.history import (
+    ClarificationExchange,
+    ResearchInteraction,
+    load_research_history,
+    store_interaction,
+)
 
 
 REPO_ROOT = Path(__file__).parents[1]
 SAMPLE_OUTPUT = REPO_ROOT / "examples" / "claims" / "sample_output"
 MISSING_SOURCE = "CLM-SAMPLE-001/DOC-999#DOC-999-CHUNK-001"
+
+
+def copy_sample_claim(tmp_path: Path) -> Path:
+    data_root = tmp_path / "claims"
+    claim_path = data_root / "CLM-SAMPLE-001"
+    shutil.copytree(SAMPLE_OUTPUT, claim_path)
+    return claim_path
 
 
 class FakeUpload:
@@ -143,6 +169,9 @@ def test_streamlit_app_renders_without_api_configuration(monkeypatch, tmp_path):
     assert not app.exception
     assert app.title[0].value == "Claim Research Workbench"
     assert "Ingest a claim" in app.info[0].value
+    assert next(item for item in app.radio if item.label == "Knowledge base").value == (
+        "Custom"
+    )
 
 
 def test_streamlit_app_renders_the_sample_knowledge_base(monkeypatch):
@@ -156,13 +185,26 @@ def test_streamlit_app_renders_the_sample_knowledge_base(monkeypatch):
         "Knowledge base",
         "Timeline",
         "Parties",
+        "Documents",
+        "Metadata",
+        "Evidence",
+        "OCR pages",
         "Research chat",
+        "New research",
+        "Report history",
     ]
     assert [(metric.label, metric.value) for metric in app.metric] == [
         ("Claim", "CLM-SAMPLE-001"),
         ("Documents", "2"),
         ("Chunks", "2"),
         ("Retrieval", "lexical"),
+        ("Selected document", "DOC-001"),
+        ("Pages", "1"),
+        ("Evidence chunks", "1"),
+    ]
+    assert [(toggle.label, toggle.value) for toggle in app.toggle] == [
+        ("Planning", True),
+        ("Show live audit", False),
     ]
 
 
@@ -179,6 +221,155 @@ def test_claim_overview_aggregates_timeline_and_parties():
         "Example Mutual",
         "Sample Body Shop",
     }
+
+
+def test_streamlit_renders_lightrag_graph_and_rebuild_controls(monkeypatch, tmp_path):
+    claim_path = copy_sample_claim(tmp_path)
+    manifest_path = claim_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(
+        retrieval_mode="lightrag",
+        embedding_provider="nvidia",
+        embedding_model="baai/bge-m3",
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    index_path = claim_path / "index" / "lightrag"
+    index_path.mkdir(parents=True)
+    metadata = LightRagIndexMetadata(
+        claim_id="CLM-SAMPLE-001",
+        llm_provider="nvidia",
+        llm_model="provider/model",
+        embedding_provider="nvidia",
+        embedding_model="baai/bge-m3",
+        embedding_dimension=1024,
+        embedding_max_tokens=8192,
+        indexed_chunk_count=2,
+        entity_count=2,
+        relationship_count=1,
+    )
+    (index_path / METADATA_FILE).write_text(
+        metadata.model_dump_json(), encoding="utf-8"
+    )
+    graph = nx.Graph()
+    graph.add_node("Acme", entity_type="ORGANIZATION")
+    graph.add_node("Repair Co", entity_type="ORGANIZATION")
+    graph.add_edge("Acme", "Repair Co", description="repaired")
+    nx.write_graphml(graph, index_path / GRAPH_FILE)
+    monkeypatch.setenv("CLAIM_DATA_ROOT", str(claim_path.parent))
+
+    app = AppTest.from_file(str(REPO_ROOT / "knowledge_agent" / "app.py"))
+    app.run(timeout=10)
+
+    assert not app.exception
+    assert any(item.value == "LightRAG graph" for item in app.subheader)
+    assert {tab.label for tab in app.tabs}.issuperset({"Entities", "Relationships"})
+    assert any(item.label == "Rebuild index" and not item.disabled for item in app.button)
+    assert ("Entities", "2") in [(item.label, item.value) for item in app.metric]
+
+
+def test_document_inventory_summarizes_extracted_metadata():
+    rows = _document_rows(load_claim_store(SAMPLE_OUTPUT))
+
+    assert rows[0] == {
+        "ID": "DOC-001",
+        "Type": "fnol",
+        "Title": "First Notice of Loss",
+        "Pages": "1",
+        "Parties": 2,
+        "Events": 2,
+        "Evidence chunks": 1,
+        "File": "DOC-001_fnol.pdf",
+    }
+
+
+def test_streamlit_app_renders_native_audit_trail(monkeypatch, tmp_path):
+    claim_path = copy_sample_claim(tmp_path)
+    monkeypatch.setenv("CLAIM_DATA_ROOT", str(claim_path.parent))
+    agent_messages = [
+        ModelRequest(parts=[UserPromptPart("Inspect the repair invoice.")]),
+        ModelResponse(parts=[]),
+    ]
+    store_interaction(
+        claim_path,
+        ResearchInteraction(
+            claim_id="CLM-SAMPLE-001",
+            status="completed",
+            question="What was repaired?",
+            planning_enabled=True,
+            output={
+                "answer": "The bumper was repaired.",
+                "source_refs": [],
+                "evidence_sufficient": False,
+            },
+            agent_messages=agent_messages,
+            audit_events=[
+                {"type": "FunctionToolCallEvent", "payload": {"part": {}}}
+            ],
+        ),
+    )
+    app = AppTest.from_file(str(REPO_ROOT / "knowledge_agent" / "app.py"))
+
+    app.run(timeout=10)
+
+    assert not app.exception
+    assert any(
+        "Saved reports and audits contain conversation text" in item.value
+        for item in app.warning
+    )
+    assert any(
+        item.label == "Audit trail (2 messages · 1 events)"
+        for item in app.expander
+    )
+    assert any(
+        item.value == "Knowledge base: engine not recorded" for item in app.caption
+    )
+
+
+def test_pending_plan_resumes_and_can_be_cancelled(monkeypatch, tmp_path):
+    claim_path = copy_sample_claim(tmp_path)
+    monkeypatch.setenv("CLAIM_DATA_ROOT", str(claim_path.parent))
+    item = ResearchInteraction(
+        claim_id="CLM-SAMPLE-001",
+        status="awaiting_approval",
+        question="What repairs were invoiced?",
+        planning_enabled=True,
+        clarifications=[
+            ClarificationExchange(
+                question="Which dates are in scope?",
+                reason="The period was ambiguous.",
+                answer="All dates.",
+            )
+        ],
+        plan={
+            "objective": "Identify invoiced repairs.",
+            "understood_scope": "All repair invoices and dates.",
+            "assumptions": [],
+            "searches": [
+                {
+                    "query": "repair invoice",
+                    "research_goal": "Find repaired items.",
+                }
+            ],
+            "completion_criteria": ["Cite every reported repair."],
+        },
+    )
+    store_interaction(claim_path, item)
+    app = AppTest.from_file(str(REPO_ROOT / "knowledge_agent" / "app.py"))
+
+    app.run(timeout=10)
+
+    assert not app.exception
+    assert "### Proposed research plan" in [value.value for value in app.markdown]
+    assert {button.label for button in app.button}.issuperset(
+        {"Approve and run", "Cancel"}
+    )
+    assert next(button for button in app.button if button.label == "Rebuild index").disabled
+
+    next(button for button in app.button if button.label == "Cancel").click().run(
+        timeout=10
+    )
+    saved = load_research_history(claim_path, "CLM-SAMPLE-001")
+    assert saved.interactions[0].status == "cancelled"
 
 
 def test_citation_marker_contains_a_safe_source_tooltip():
@@ -209,46 +400,76 @@ def test_unresolved_citation_blocks_answer_rendering():
         )
 
 
-def test_saved_answer_with_unresolved_citation_shows_error(monkeypatch):
-    monkeypatch.setenv("CLAIM_DATA_ROOT", str(SAMPLE_OUTPUT.parent))
-    research = {
-        "question": "What was repaired?",
-        "answer": f"Untrusted answer. [{MISSING_SOURCE}]",
-        "plan": {
-            "objectives": ["Answer the question."],
-            "queries": [
-                {
-                    "query": "repair",
-                    "research_goal": "Find repair evidence.",
-                }
-            ],
-        },
-        "searches": [],
-        "gap_reviews": [],
-        "steps": [],
-        "findings": [],
-        "source_refs": [MISSING_SOURCE],
-    }
+def test_saved_answer_with_unresolved_citation_shows_error(monkeypatch, tmp_path):
+    claim_path = copy_sample_claim(tmp_path)
+    monkeypatch.setenv("CLAIM_DATA_ROOT", str(claim_path.parent))
+    store_interaction(
+        claim_path,
+        ResearchInteraction(
+            claim_id="CLM-SAMPLE-001",
+            status="completed",
+            question="Render a missing source.",
+            planning_enabled=False,
+            output={
+                "answer": f"Untrusted answer. [{MISSING_SOURCE}]",
+                "source_refs": [MISSING_SOURCE],
+                "evidence_sufficient": True,
+            },
+        ),
+    )
     app = AppTest.from_file(str(REPO_ROOT / "knowledge_agent" / "app.py"))
-    app.session_state["claim_chat_histories"] = {
-        "CLM-SAMPLE-001": [
-            {
-                "role": "assistant",
-                "content": research["answer"],
-                "research": research,
-            }
-        ]
-    }
 
     app.run(timeout=10)
 
     assert not app.exception
     assert any(
-        "Could not display saved research answer: Citation source not found"
+        "Could not display saved research report: Citation source not found"
         in error.value
         for error in app.error
     )
     assert all("Untrusted answer" not in item.value for item in app.markdown)
+
+
+def test_native_tool_trace_extracts_claim_search_details():
+    messages = [
+        ModelResponse(
+            parts=[
+                ToolCallPart(
+                    "claim_search",
+                    {"query": "repair", "research_goal": "Find repairs"},
+                    tool_call_id="search-1",
+                )
+            ]
+        ),
+        ModelRequest(
+            parts=[
+                ToolReturnPart(
+                    "claim_search",
+                    [
+                        {
+                            "source_ref": (
+                                "CLM-SAMPLE-001/DOC-002#DOC-002-CHUNK-001"
+                            )
+                        }
+                    ],
+                    tool_call_id="search-1",
+                )
+            ]
+        ),
+    ]
+
+    trace = _claim_search_trace(messages)
+
+    assert trace == [
+        {
+            "query": "repair",
+            "research_goal": "Find repairs",
+            "source_refs": [
+                "CLM-SAMPLE-001/DOC-002#DOC-002-CHUNK-001"
+            ],
+        }
+    ]
+    assert to_jsonable_python(messages)
 
 
 @pytest.mark.parametrize("value", ["hi", "Hello!", "HEY", "Good morning"])

@@ -12,7 +12,6 @@ from knowledge_agent.claims.dependencies import live_ingestion_services, open_cl
 from knowledge_agent.claims.store import search_claim
 from knowledge_agent.config import ConfigurationError
 from knowledge_agent.llm.config import LlmSettings
-from knowledge_agent.llm.providers import ProviderClients
 from knowledge_agent.claims.vector_store import VectorSearchHit
 
 
@@ -59,20 +58,20 @@ def claim_settings(**updates) -> ClaimSettings:
     return ClaimSettings(**values)
 
 
-def provider_context(clients):
+def runtime_context(runtime):
     @contextmanager
-    def open_clients(settings):
-        yield clients
+    def open_runtime(settings):
+        yield runtime
 
-    return open_clients
+    return open_runtime
 
 
 def test_api_key_profile_builds_key_ocr_without_semantic_dependencies(monkeypatch):
     ocr = FakeResource()
     ocr_calls = []
     monkeypatch.setattr(
-        "knowledge_agent.claims.dependencies.open_provider_clients",
-        provider_context(ProviderClients(openai=object())),
+        "knowledge_agent.claims.dependencies.open_agent_runtime",
+        runtime_context(SimpleNamespace()),
     )
     monkeypatch.setattr(
         "knowledge_agent.claims.dependencies.AzureDocumentIntelligenceOcrClient",
@@ -103,6 +102,40 @@ def test_api_key_profile_builds_key_ocr_without_semantic_dependencies(monkeypatc
     assert ocr.closed
 
 
+def test_api_key_profile_builds_lightrag_without_new_credentials(monkeypatch):
+    ocr = FakeResource()
+    runtime = SimpleNamespace()
+    monkeypatch.setattr(
+        "knowledge_agent.claims.dependencies.open_agent_runtime",
+        runtime_context(runtime),
+    )
+    monkeypatch.setattr(
+        "knowledge_agent.claims.dependencies.AzureDocumentIntelligenceOcrClient",
+        lambda endpoint, credential: ocr,
+    )
+    monkeypatch.setattr(
+        "knowledge_agent.claims.dependencies.SnowflakeAiEmbedder",
+        lambda *args: pytest.fail("NVIDIA LightRAG must not construct Snowflake"),
+    )
+
+    with live_ingestion_services(
+        "CLM-LIGHTRAG",
+        claim_settings(
+            document_intelligence_endpoint="https://example.cognitiveservices.azure.com",
+            document_intelligence_api_key="secret-document-key",
+        ),
+        api_key_llm_settings(),
+        "lightrag",
+    ) as services:
+        assert services.retrieval_mode == "lightrag"
+        assert services.embedding_provider == "nvidia"
+        assert services.embedding_model == "baai/bge-m3"
+        assert callable(services.lightrag_indexer)
+        assert services.embedder is None
+
+    assert ocr.closed
+
+
 def test_azure_project_profile_builds_snowflake_and_chroma(monkeypatch):
     connection_calls = []
     connections = SimpleNamespace(
@@ -116,10 +149,9 @@ def test_azure_project_profile_builds_snowflake_and_chroma(monkeypatch):
     ocr = FakeResource()
     embedder = FakeEmbedder()
     monkeypatch.setattr(
-        "knowledge_agent.claims.dependencies.open_provider_clients",
-        provider_context(
-            ProviderClients(
-                openai=object(),
+        "knowledge_agent.claims.dependencies.open_agent_runtime",
+        runtime_context(
+            SimpleNamespace(
                 azure_project=project,
                 azure_credential=credential,
             )
@@ -158,10 +190,9 @@ def test_azure_project_rejects_connection_without_target(monkeypatch):
         )
     )
     monkeypatch.setattr(
-        "knowledge_agent.claims.dependencies.open_provider_clients",
-        provider_context(
-            ProviderClients(
-                openai=object(),
+        "knowledge_agent.claims.dependencies.open_agent_runtime",
+        runtime_context(
+            SimpleNamespace(
                 azure_project=project,
                 azure_credential=FakeResource(),
             )
