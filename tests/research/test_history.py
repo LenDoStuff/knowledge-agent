@@ -1,3 +1,5 @@
+"""Tests for typed, atomic research-history persistence."""
+
 from pathlib import Path
 
 import pytest

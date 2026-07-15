@@ -19,7 +19,9 @@ cited answer. The Streamlit workbench can first clarify scope and pause on a
 structured plan. It persists messages, plans, reports, audit events, and usage;
 claim evidence and citation identifiers are unchanged.
 
-The CLI automatically opens the retrieval engine persisted in the claim
-manifest. LightRAG is retrieval-only: its structured chunk results feed
+The CLI automatically opens the primary retrieval engine persisted in the claim
+manifest. For claims with both indexes, Streamlit explicitly selects Custom or
+LightRAG before starting each independent interaction and stores that choice in
+the report audit. LightRAG is retrieval-only: its structured chunk results feed
 `claim_search`, while Pydantic Deep remains responsible for planning, reporting,
 citation validation, native history, and audit events.

@@ -34,7 +34,9 @@ is independent from earlier reports.
 Claims support lexical retrieval over stored text, semantic retrieval over a
 claim-local Chroma index, or embedded LightRAG retrieval over a claim-local
 entity graph and vector index. All modes return the same citation-bearing chunk
-evidence to the research agent. LightRAG never generates the final report.
+evidence to the research agent. A claim can retain Custom and LightRAG indexes
+at the same time; Streamlit selects one for each new report and records it in the
+audit snapshot. LightRAG never generates the final report.
 
 ## Claim knowledge-base layout
 
@@ -109,6 +111,7 @@ files, and holds the document metadata used for inspection and research.
 | `documents` | Ordered logical-document metadata records. |
 | `chunk_count` | Total number of records in `chunks.jsonl`. |
 | `retrieval_mode` | `lexical`, `semantic`, or `lightrag`. |
+| `additional_retrieval_modes` | Other indexes available for explicit per-run selection; `both` adds `lightrag` to a Custom primary mode. |
 | `embedding_provider`, `embedding_model` | Present for semantic and LightRAG claims; `null` for lexical claims. |
 | `created_at` | UTC creation timestamp. |
 
@@ -195,7 +198,7 @@ Example line:
 The `source_ref` is the durable bridge between metadata events, search results,
 and citations in the final answer.
 
-### `index/chroma/` (semantic claims only)
+### `index/chroma/` (claims with semantic retrieval)
 
 **Purpose:** keep the claim-local semantic retrieval index.
 
@@ -206,7 +209,7 @@ The index associates vectors and retrieval metadata with `chunk_id` values. It
 is absent for lexical claims, whose retrieval relies on `chunks.jsonl` and
 `manifest.json` only.
 
-### `index/lightrag/` (LightRAG claims only)
+### `index/lightrag/` (claims with LightRAG retrieval)
 
 **Purpose:** keep the embedded LightRAG JSON KV, NanoVectorDB, NetworkX graph,
 document-status data, LLM cache, and index metadata for one claim.
@@ -220,7 +223,9 @@ partial result.
 
 The index can be rebuilt atomically from `chunks.jsonl`. A successful rebuild
 replaces only the retrieval index and manifest retrieval fields. A failed
-rebuild leaves the previous engine intact.
+rebuild leaves the previous engine intact. Validation also checks LightRAG's
+document-status store, so a graph with failed or missing vector flushes is not
+treated as a complete knowledge base.
 
 ### `run_log.json`
 
@@ -284,8 +289,8 @@ PDF sources
   -> manifest.json (documents, parties, events)
 
 chunks.jsonl
-  -> index/chroma/ when retrieval_mode is semantic
-  -> index/lightrag/ when retrieval_mode is lightrag
+  -> index/chroma/ when semantic retrieval is available
+  -> index/lightrag/ when LightRAG retrieval is available
 
 manifest events + chunks
   -> source_ref citations

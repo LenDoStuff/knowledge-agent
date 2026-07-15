@@ -1,3 +1,5 @@
+"""Tests for research output and planning models."""
+
 import pytest
 from pydantic import ValidationError
 

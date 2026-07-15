@@ -1,3 +1,5 @@
+"""Opt-in live contract for NVIDIA and OCR claim ingestion."""
+
 from __future__ import annotations
 
 import json

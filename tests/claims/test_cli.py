@@ -1,3 +1,5 @@
+"""Tests for claim-ingestion CLI arguments and logging."""
+
 import logging
 
 import pytest
@@ -38,6 +40,18 @@ def test_cli_accepts_exactly_one_ingestion_input():
         ]
     )
     assert lightrag_args.knowledge_base == "lightrag"
+
+    both_args = parser.parse_args(
+        [
+            "--claim-id",
+            "CLM-003",
+            "--pdf-path",
+            "claim.pdf",
+            "--knowledge-base",
+            "both",
+        ]
+    )
+    assert both_args.knowledge_base == "both"
 
     with pytest.raises(SystemExit):
         parser.parse_args(["--claim-id", "CLM-001"])

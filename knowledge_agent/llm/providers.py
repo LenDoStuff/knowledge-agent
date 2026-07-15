@@ -70,6 +70,7 @@ def open_agent_runtime(settings: LlmSettings) -> Iterator[AgentRuntime]:
 
     runner = asyncio.Runner()
     loop = runner.get_loop()
+
     def run_loop() -> None:
         loop.run_forever()
         runner.close()

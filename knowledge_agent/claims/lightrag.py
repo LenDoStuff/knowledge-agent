@@ -4,18 +4,25 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import shutil
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
 from importlib.metadata import version
 from pathlib import Path
+from threading import RLock
 from typing import Any, Iterator, Literal, Sequence
 
 import networkx as nx
 import numpy as np
 from lightrag import LightRAG, QueryParam
+from lightrag.base import DocStatus
+from lightrag.kg.shared_storage import finalize_share_data
 from lightrag.utils import EmbeddingFunc
+from openai import APIStatusError
+from openai.types import CreateEmbeddingResponse
 from pydantic import BaseModel, Field
 from pydantic_ai import (
     Agent,
@@ -38,11 +45,20 @@ from knowledge_agent.llm.providers import AgentRuntime
 
 LIGHTRAG_VERSION = "1.5.4"
 LIGHTRAG_QUERY_MODE = "hybrid"
-NVIDIA_EMBEDDING_MODEL = "baai/bge-m3"
+NVIDIA_EMBEDDING_MODEL = "nvidia/llama-nemotron-embed-1b-v2"
 NVIDIA_EMBEDDING_DIMENSION = 1024
 NVIDIA_EMBEDDING_MAX_TOKENS = 8192
 METADATA_FILE = "metadata.json"
 GRAPH_FILE = "graph_chunk_entity_relation.graphml"
+DOC_STATUS_FILE = "kv_store_doc_status.json"
+LLM_CACHE_FILE = "kv_store_llm_response_cache.json"
+NVIDIA_EMBEDDING_BATCH_SIZE = 32
+NVIDIA_EMBEDDING_MAX_RETRIES = 3
+NVIDIA_EMBEDDING_RETRY_STATUSES = {429, 500, 502, 503, 504}
+NVIDIA_LLM_MIN_INTERVAL_SECONDS = 10.0
+_LIGHTRAG_RESOURCE_LOCK = RLock()
+LOGGER = logging.getLogger(__name__)
+NvidiaEmbeddingInputType = Literal["passage", "query"]
 
 SNOWFLAKE_EMBEDDING_SPECS: dict[str, tuple[int, int]] = {
     "snowflake-arctic-embed-l-v2.0": (1024, 512),
@@ -98,10 +114,18 @@ class LightRagGraph:
 class _PydanticLightRagModel:
     """Adapt LightRAG prompt calls to the selected PydanticAI model."""
 
-    def __init__(self, runtime: AgentRuntime) -> None:
+    def __init__(
+        self,
+        runtime: AgentRuntime,
+        *,
+        min_request_interval_seconds: float = 0.0,
+    ) -> None:
         self.runtime = runtime
         self.usage = RunUsage()
         self.usage_limits: UsageLimits | None = None
+        self.min_request_interval_seconds = min_request_interval_seconds
+        self._request_lock = asyncio.Lock()
+        self._last_request_started: float | None = None
 
     async def complete(
         self,
@@ -122,14 +146,27 @@ class _PydanticLightRagModel:
             retries=0,
         )
         model_settings = {"max_tokens": max_tokens} if max_tokens else None
-        result = await agent.run(
-            prompt,
-            instructions=system_prompt,
-            message_history=_model_history(history_messages or ()),
-            usage=self.usage,
-            usage_limits=self.usage_limits,
-            model_settings=model_settings,
-        )
+        async with self._request_lock:
+            loop = asyncio.get_running_loop()
+            if self._last_request_started is not None:
+                delay = self.min_request_interval_seconds - (
+                    loop.time() - self._last_request_started
+                )
+                if delay > 0:
+                    LOGGER.info(
+                        "lightrag_llm_request_pacing delay_seconds=%.2f",
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+            self._last_request_started = loop.time()
+            result = await agent.run(
+                prompt,
+                instructions=system_prompt,
+                message_history=_model_history(history_messages or ()),
+                usage=self.usage,
+                usage_limits=self.usage_limits,
+                model_settings=model_settings,
+            )
         if isinstance(result.output, str):
             return result.output
         return json.dumps(result.output, ensure_ascii=False)
@@ -140,6 +177,7 @@ class LightRagResource:
     rag: LightRAG
     model_adapter: _PydanticLightRagModel
     metadata: LightRagIndexMetadata | None = None
+    embedding_input_type: ContextVar[NvidiaEmbeddingInputType] | None = None
 
     def bind_usage(self, usage: RunUsage, limits: UsageLimits) -> None:
         self.model_adapter.usage = usage
@@ -150,15 +188,24 @@ class LightRagResource:
         self.model_adapter.usage_limits = None
 
     async def retrieve_chunk_ids(self, query: str, top_k: int) -> list[str]:
-        result = await self.rag.aquery_data(
-            query,
-            QueryParam(
-                mode=LIGHTRAG_QUERY_MODE,
-                top_k=top_k,
-                chunk_top_k=top_k,
-                enable_rerank=False,
-            ),
+        token = (
+            self.embedding_input_type.set("query")
+            if self.embedding_input_type is not None
+            else None
         )
+        try:
+            result = await self.rag.aquery_data(
+                query,
+                QueryParam(
+                    mode=LIGHTRAG_QUERY_MODE,
+                    top_k=top_k,
+                    chunk_top_k=top_k,
+                    enable_rerank=False,
+                ),
+            )
+        finally:
+            if self.embedding_input_type is not None and token is not None:
+                self.embedding_input_type.reset(token)
         if result.get("status") != "success":
             message = str(result.get("message") or "LightRAG query failed")
             if "no result" in message.casefold() or "no relevant" in message.casefold():
@@ -191,7 +238,10 @@ class LightRagResource:
         return chunk_ids
 
     async def close(self) -> None:
-        await self.rag.finalize_storages()
+        try:
+            await self.rag.finalize_storages()
+        finally:
+            finalize_share_data()
 
 
 def embedding_spec(
@@ -228,18 +278,21 @@ def index_lightrag_chunks(
     spec: EmbeddingSpec,
     *,
     snowflake_embedder: TextEmbedder | None = None,
+    seed_cache_path: Path | None = None,
 ) -> LightRagIndexMetadata:
-    return runtime.run_coroutine(
-        _index_lightrag_chunks(
-            runtime,
-            settings,
-            index_path,
-            claim_id,
-            chunks,
-            spec,
-            snowflake_embedder=snowflake_embedder,
+    with _LIGHTRAG_RESOURCE_LOCK:
+        return runtime.run_coroutine(
+            _index_lightrag_chunks(
+                runtime,
+                settings,
+                index_path,
+                claim_id,
+                chunks,
+                spec,
+                snowflake_embedder=snowflake_embedder,
+                seed_cache_path=seed_cache_path,
+            )
         )
-    )
 
 
 async def _index_lightrag_chunks(
@@ -251,10 +304,13 @@ async def _index_lightrag_chunks(
     spec: EmbeddingSpec,
     *,
     snowflake_embedder: TextEmbedder | None,
+    seed_cache_path: Path | None,
 ) -> LightRagIndexMetadata:
     if index_path.exists():
         shutil.rmtree(index_path)
     index_path.mkdir(parents=True)
+    if seed_cache_path is not None and seed_cache_path.exists():
+        shutil.copy2(seed_cache_path, index_path / LLM_CACHE_FILE)
     resource = await create_lightrag_resource(
         runtime,
         settings,
@@ -264,11 +320,30 @@ async def _index_lightrag_chunks(
     )
     try:
         if chunks:
+            document_ids = [chunk.source_ref for chunk in chunks]
             await resource.rag.ainsert(
                 [chunk.text for chunk in chunks],
-                ids=[chunk.source_ref for chunk in chunks],
+                ids=document_ids,
                 file_paths=[chunk.chunk_id for chunk in chunks],
             )
+            statuses = await resource.rag.aget_docs_by_ids(document_ids)
+            incomplete = [
+                (document_id, statuses.get(document_id))
+                for document_id in document_ids
+                if _document_status(statuses.get(document_id))
+                != DocStatus.PROCESSED.value
+            ]
+            if incomplete:
+                document_list = ", ".join(item[0] for item in incomplete)
+                error_details = [
+                    f"{document_id}: {error}"
+                    for document_id, record in incomplete
+                    if (error := _document_error(record)) is not None
+                ]
+                message = "LightRAG indexing did not complete for: " + document_list
+                if error_details:
+                    message += ". Errors: " + "; ".join(error_details)
+                raise RuntimeError(message)
         nodes = await resource.rag.chunk_entity_relation_graph.get_all_nodes()
         edges = await resource.rag.chunk_entity_relation_graph.get_all_edges()
         metadata = LightRagIndexMetadata(
@@ -304,15 +379,41 @@ async def create_lightrag_resource(
     if spec.provider == "snowflake" and snowflake_embedder is None:
         raise ValueError("Snowflake LightRAG requires a Snowflake embedder")
 
-    model_adapter = _PydanticLightRagModel(runtime)
+    model_adapter = _PydanticLightRagModel(
+        runtime,
+        min_request_interval_seconds=(
+            NVIDIA_LLM_MIN_INTERVAL_SECONDS if settings.profile == "api_key" else 0.0
+        ),
+    )
+    embedding_input_type = ContextVar[NvidiaEmbeddingInputType](
+        "lightrag_embedding_input_type",
+        default="passage",
+    )
+
+    async def complete(
+        prompt: str,
+        system_prompt: str | None = None,
+        history_messages: Sequence[dict[str, str]] | None = None,
+        max_tokens: int | None = None,
+        response_format: object | None = None,
+        **kwargs: object,
+    ) -> str:
+        return await model_adapter.complete(
+            prompt,
+            system_prompt=system_prompt,
+            history_messages=history_messages,
+            max_tokens=max_tokens,
+            response_format=response_format,
+            **kwargs,
+        )
 
     async def embed(texts: list[str]) -> np.ndarray:
         if spec.provider == "nvidia":
-            response = await runtime.openai.embeddings.create(
-                model=spec.model,
-                input=texts,
-                encoding_format="float",
-                extra_body={"truncate": "END"},
+            response = await _create_nvidia_embeddings(
+                runtime,
+                spec,
+                texts,
+                embedding_input_type.get(),
             )
             ordered = sorted(response.data, key=lambda item: item.index)
             return np.asarray([item.embedding for item in ordered], dtype=float)
@@ -320,23 +421,76 @@ async def create_lightrag_resource(
         values = await asyncio.to_thread(snowflake_embedder.embed_texts, texts)
         return np.asarray(values, dtype=float)
 
-    rag = LightRAG(
-        working_dir=str(index_path),
-        embedding_func=EmbeddingFunc(
-            embedding_dim=spec.dimension,
-            max_token_size=spec.max_tokens,
-            model_name=spec.model,
-            func=embed,
-        ),
-        embedding_func_max_async=4 if spec.provider == "nvidia" else 1,
-        llm_model_func=model_adapter.complete,
-        llm_model_name=settings.model,
-        llm_model_max_async=4,
-        enable_llm_cache=True,
-        enable_llm_cache_for_entity_extract=True,
+    rag: LightRAG | None = None
+    try:
+        rag = LightRAG(
+            working_dir=str(index_path),
+            embedding_func=EmbeddingFunc(
+                embedding_dim=spec.dimension,
+                max_token_size=spec.max_tokens,
+                model_name=spec.model,
+                func=embed,
+            ),
+            embedding_batch_num=(
+                NVIDIA_EMBEDDING_BATCH_SIZE if spec.provider == "nvidia" else 10
+            ),
+            embedding_func_max_async=1,
+            llm_model_func=complete,
+            llm_model_name=settings.model,
+            llm_model_max_async=1,
+            max_parallel_insert=1,
+            enable_llm_cache=True,
+            enable_llm_cache_for_entity_extract=True,
+        )
+        await rag.initialize_storages()
+    except Exception:
+        try:
+            if rag is not None:
+                await rag.finalize_storages()
+        finally:
+            finalize_share_data()
+        raise
+    return LightRagResource(
+        rag=rag,
+        model_adapter=model_adapter,
+        metadata=metadata,
+        embedding_input_type=embedding_input_type,
     )
-    await rag.initialize_storages()
-    return LightRagResource(rag=rag, model_adapter=model_adapter, metadata=metadata)
+
+
+async def _create_nvidia_embeddings(
+    runtime: AgentRuntime,
+    spec: EmbeddingSpec,
+    texts: list[str],
+    input_type: NvidiaEmbeddingInputType,
+) -> CreateEmbeddingResponse:
+    for retry_number in range(NVIDIA_EMBEDDING_MAX_RETRIES + 1):
+        try:
+            return await runtime.openai.embeddings.create(
+                model=spec.model,
+                input=texts,
+                dimensions=spec.dimension,
+                encoding_format="float",
+                extra_body={"input_type": input_type, "truncate": "END"},
+            )
+        except APIStatusError as exc:
+            if (
+                exc.status_code not in NVIDIA_EMBEDDING_RETRY_STATUSES
+                or retry_number == NVIDIA_EMBEDDING_MAX_RETRIES
+            ):
+                raise
+            delay_seconds = 2**retry_number
+            LOGGER.warning(
+                "nvidia_embedding_retry retry=%s max_retries=%s status=%s "
+                "delay_seconds=%s batch_size=%s",
+                retry_number + 1,
+                NVIDIA_EMBEDDING_MAX_RETRIES,
+                exc.status_code,
+                delay_seconds,
+                len(texts),
+            )
+            await asyncio.sleep(delay_seconds)
+    raise AssertionError("unreachable")
 
 
 @contextmanager
@@ -349,20 +503,21 @@ def open_lightrag_resource(
     snowflake_embedder: TextEmbedder | None = None,
     metadata: LightRagIndexMetadata | None = None,
 ) -> Iterator[LightRagResource]:
-    resource = runtime.run_coroutine(
-        create_lightrag_resource(
-            runtime,
-            settings,
-            index_path,
-            spec,
-            snowflake_embedder=snowflake_embedder,
-            metadata=metadata,
+    with _LIGHTRAG_RESOURCE_LOCK:
+        resource = runtime.run_coroutine(
+            create_lightrag_resource(
+                runtime,
+                settings,
+                index_path,
+                spec,
+                snowflake_embedder=snowflake_embedder,
+                metadata=metadata,
+            )
         )
-    )
-    try:
-        yield resource
-    finally:
-        runtime.run_coroutine(resource.close())
+        try:
+            yield resource
+        finally:
+            runtime.run_coroutine(resource.close())
 
 
 def load_lightrag_metadata(index_path: Path) -> LightRagIndexMetadata:
@@ -387,7 +542,48 @@ def validate_lightrag_index(
         raise ValueError("LightRAG embedding model does not match manifest")
     if not (index_path / GRAPH_FILE).exists():
         raise FileNotFoundError("LightRAG graph index is missing")
+    _validate_document_statuses(index_path, metadata.indexed_chunk_count)
     return metadata
+
+
+def _validate_document_statuses(index_path: Path, expected_count: int) -> None:
+    if expected_count == 0:
+        return
+    data = read_json(index_path / DOC_STATUS_FILE)
+    if not isinstance(data, dict):
+        raise ValueError("LightRAG document status must contain a JSON object")
+    if len(data) != expected_count:
+        raise ValueError("LightRAG document status count does not match metadata")
+    incomplete = [
+        document_id
+        for document_id, record in data.items()
+        if not isinstance(record, dict)
+        or record.get("status") != DocStatus.PROCESSED.value
+    ]
+    if incomplete:
+        raise ValueError(
+            "LightRAG index contains incomplete documents: " + ", ".join(incomplete)
+        )
+
+
+def _document_status(record: object) -> str | None:
+    status = (
+        record.get("status")
+        if isinstance(record, dict)
+        else getattr(record, "status", None)
+    )
+    if isinstance(status, DocStatus):
+        return status.value
+    return status if isinstance(status, str) else None
+
+
+def _document_error(record: object) -> str | None:
+    error = (
+        record.get("error_msg")
+        if isinstance(record, dict)
+        else getattr(record, "error_msg", None)
+    )
+    return error.strip() if isinstance(error, str) and error.strip() else None
 
 
 def load_lightrag_graph(index_path: Path) -> LightRagGraph:

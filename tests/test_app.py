@@ -1,10 +1,12 @@
-import shutil
+"""Tests for Streamlit claim, knowledge-base, and research views."""
+
 import json
+import shutil
 from contextlib import contextmanager
 from pathlib import Path
 
-import pytest
 import networkx as nx
+import pytest
 from pydantic_ai import (
     ModelRequest,
     ModelResponse,
@@ -15,22 +17,14 @@ from pydantic_ai import (
 from pydantic_core import to_jsonable_python
 from streamlit.testing.v1 import AppTest
 
-from knowledge_agent.app import (
-    COMBINED_LABEL,
-    SEPARATE_LABEL,
-    _claim_search_trace,
-    _cited_answer_html,
-    _document_rows,
-    _is_greeting,
-    _party_rows,
-    _timeline_rows,
-    discover_claims,
-    ingest_uploads,
-    validate_uploads,
-)
 from knowledge_agent.claims.config import ClaimSettings
 from knowledge_agent.claims.errors import ChunkNotFoundError
-from knowledge_agent.claims.lightrag import GRAPH_FILE, METADATA_FILE, LightRagIndexMetadata
+from knowledge_agent.claims.lightrag import (
+    DOC_STATUS_FILE,
+    GRAPH_FILE,
+    METADATA_FILE,
+    LightRagIndexMetadata,
+)
 from knowledge_agent.claims.store import load_claim_store
 from knowledge_agent.llm.config import LlmSettings
 from knowledge_agent.research.history import (
@@ -39,6 +33,20 @@ from knowledge_agent.research.history import (
     load_research_history,
     store_interaction,
 )
+from knowledge_agent.ui.claims import (
+    COMBINED_LABEL,
+    SEPARATE_LABEL,
+    discover_claims,
+    ingest_uploads,
+    validate_uploads,
+)
+from knowledge_agent.ui.knowledge_base import (
+    document_rows,
+    party_rows,
+    timeline_rows,
+)
+from knowledge_agent.ui.reports import cited_answer_html, claim_search_trace
+from knowledge_agent.ui.research import is_greeting
 
 
 REPO_ROOT = Path(__file__).parents[1]
@@ -51,6 +59,40 @@ def copy_sample_claim(tmp_path: Path) -> Path:
     claim_path = data_root / "CLM-SAMPLE-001"
     shutil.copytree(SAMPLE_OUTPUT, claim_path)
     return claim_path
+
+
+def write_test_lightrag_index(claim_path: Path) -> None:
+    index_path = claim_path / "index" / "lightrag"
+    index_path.mkdir(parents=True)
+    metadata = LightRagIndexMetadata(
+        claim_id="CLM-SAMPLE-001",
+        llm_provider="nvidia",
+        llm_model="provider/model",
+        embedding_provider="nvidia",
+        embedding_model="baai/bge-m3",
+        embedding_dimension=1024,
+        embedding_max_tokens=8192,
+        indexed_chunk_count=2,
+        entity_count=2,
+        relationship_count=1,
+    )
+    (index_path / METADATA_FILE).write_text(
+        metadata.model_dump_json(), encoding="utf-8"
+    )
+    graph = nx.Graph()
+    graph.add_node("Acme", entity_type="ORGANIZATION")
+    graph.add_node("Repair Co", entity_type="ORGANIZATION")
+    graph.add_edge("Acme", "Repair Co", description="repaired")
+    nx.write_graphml(graph, index_path / GRAPH_FILE)
+    (index_path / DOC_STATUS_FILE).write_text(
+        json.dumps(
+            {
+                f"source-{index}": {"status": "processed"}
+                for index in range(2)
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 class FakeUpload:
@@ -140,11 +182,11 @@ def test_ingest_uploads_removes_output_created_by_a_failed_run(
         raise RuntimeError("metadata failed")
 
     monkeypatch.setattr(
-        "knowledge_agent.app.live_ingestion_services",
+        "knowledge_agent.ui.claims.live_ingestion_services",
         fake_services,
     )
     monkeypatch.setattr(
-        "knowledge_agent.app.ingest_claim_pdf",
+        "knowledge_agent.ui.claims.ingest_claim_pdf",
         fail_after_creating_output,
     )
 
@@ -172,6 +214,9 @@ def test_streamlit_app_renders_without_api_configuration(monkeypatch, tmp_path):
     assert next(item for item in app.radio if item.label == "Knowledge base").value == (
         "Custom"
     )
+    assert next(
+        item for item in app.radio if item.label == "Knowledge base"
+    ).options == ["Custom", "LightRAG", "Both"]
 
 
 def test_streamlit_app_renders_the_sample_knowledge_base(monkeypatch):
@@ -206,13 +251,18 @@ def test_streamlit_app_renders_the_sample_knowledge_base(monkeypatch):
         ("Planning", True),
         ("Show live audit", False),
     ]
+    engine = next(
+        item for item in app.selectbox if item.label == "Research knowledge base"
+    )
+    assert engine.value == "lexical"
+    assert engine.options == ["Custom (lexical)"]
 
 
 def test_claim_overview_aggregates_timeline_and_parties():
     store = load_claim_store(SAMPLE_OUTPUT)
 
-    timeline = _timeline_rows(store)
-    parties = _party_rows(store)
+    timeline = timeline_rows(store)
+    parties = party_rows(store)
 
     assert timeline[0]["Date"] == "2026-06-01"
     assert timeline[-1]["Date"] == "Undated"
@@ -233,28 +283,7 @@ def test_streamlit_renders_lightrag_graph_and_rebuild_controls(monkeypatch, tmp_
         embedding_model="baai/bge-m3",
     )
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    index_path = claim_path / "index" / "lightrag"
-    index_path.mkdir(parents=True)
-    metadata = LightRagIndexMetadata(
-        claim_id="CLM-SAMPLE-001",
-        llm_provider="nvidia",
-        llm_model="provider/model",
-        embedding_provider="nvidia",
-        embedding_model="baai/bge-m3",
-        embedding_dimension=1024,
-        embedding_max_tokens=8192,
-        indexed_chunk_count=2,
-        entity_count=2,
-        relationship_count=1,
-    )
-    (index_path / METADATA_FILE).write_text(
-        metadata.model_dump_json(), encoding="utf-8"
-    )
-    graph = nx.Graph()
-    graph.add_node("Acme", entity_type="ORGANIZATION")
-    graph.add_node("Repair Co", entity_type="ORGANIZATION")
-    graph.add_edge("Acme", "Repair Co", description="repaired")
-    nx.write_graphml(graph, index_path / GRAPH_FILE)
+    write_test_lightrag_index(claim_path)
     monkeypatch.setenv("CLAIM_DATA_ROOT", str(claim_path.parent))
 
     app = AppTest.from_file(str(REPO_ROOT / "knowledge_agent" / "app.py"))
@@ -267,8 +296,68 @@ def test_streamlit_renders_lightrag_graph_and_rebuild_controls(monkeypatch, tmp_
     assert ("Entities", "2") in [(item.label, item.value) for item in app.metric]
 
 
+def test_streamlit_both_claim_lets_research_choose_an_engine(monkeypatch, tmp_path):
+    claim_path = copy_sample_claim(tmp_path)
+    manifest_path = claim_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(
+        additional_retrieval_modes=["lightrag"],
+        embedding_provider="nvidia",
+        embedding_model="baai/bge-m3",
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    write_test_lightrag_index(claim_path)
+    monkeypatch.setenv("CLAIM_DATA_ROOT", str(claim_path.parent))
+
+    app = AppTest.from_file(str(REPO_ROOT / "knowledge_agent" / "app.py"))
+    app.run(timeout=10)
+
+    assert not app.exception
+    assert ("Retrieval", "lexical + lightrag") in [
+        (item.label, item.value) for item in app.metric
+    ]
+    research_engine = next(
+        item for item in app.selectbox if item.label == "Research knowledge base"
+    )
+    assert research_engine.options == ["Custom (lexical)", "LightRAG"]
+    rebuild_engine = next(
+        item for item in app.selectbox if item.label == "Target engine"
+    )
+    assert rebuild_engine.value == "Both"
+
+
+def test_streamlit_surfaces_corrupt_lightrag_and_keeps_rebuild_available(
+    monkeypatch,
+    tmp_path,
+):
+    claim_path = copy_sample_claim(tmp_path)
+    manifest_path = claim_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(
+        retrieval_mode="lightrag",
+        embedding_provider="nvidia",
+        embedding_model="baai/bge-m3",
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    write_test_lightrag_index(claim_path)
+    status_path = claim_path / "index" / "lightrag" / DOC_STATUS_FILE
+    statuses = json.loads(status_path.read_text(encoding="utf-8"))
+    statuses[next(iter(statuses))]["status"] = "failed"
+    status_path.write_text(json.dumps(statuses), encoding="utf-8")
+    monkeypatch.setenv("CLAIM_DATA_ROOT", str(claim_path.parent))
+
+    app = AppTest.from_file(str(REPO_ROOT / "knowledge_agent" / "app.py"))
+    app.run(timeout=10)
+
+    assert not app.exception
+    assert any("incomplete documents" in item.value for item in app.error)
+    assert not next(
+        button for button in app.button if button.label == "Rebuild index"
+    ).disabled
+
+
 def test_document_inventory_summarizes_extracted_metadata():
-    rows = _document_rows(load_claim_store(SAMPLE_OUTPUT))
+    rows = document_rows(load_claim_store(SAMPLE_OUTPUT))
 
     assert rows[0] == {
         "ID": "DOC-001",
@@ -376,7 +465,7 @@ def test_citation_marker_contains_a_safe_source_tooltip():
     store = load_claim_store(SAMPLE_OUTPUT)
     source_ref = "CLM-SAMPLE-001/DOC-002#DOC-002-CHUNK-001"
 
-    rendered = _cited_answer_html(
+    rendered = cited_answer_html(
         f"A bumper cover was invoiced. [{source_ref}]",
         [source_ref],
         store,
@@ -393,7 +482,7 @@ def test_unresolved_citation_blocks_answer_rendering():
     store = load_claim_store(SAMPLE_OUTPUT)
 
     with pytest.raises(ChunkNotFoundError, match="Citation source not found"):
-        _cited_answer_html(
+        cited_answer_html(
             f"This answer must not render. [{MISSING_SOURCE}]",
             [MISSING_SOURCE],
             store,
@@ -458,7 +547,7 @@ def test_native_tool_trace_extracts_claim_search_details():
         ),
     ]
 
-    trace = _claim_search_trace(messages)
+    trace = claim_search_trace(messages)
 
     assert trace == [
         {
@@ -474,11 +563,11 @@ def test_native_tool_trace_extracts_claim_search_details():
 
 @pytest.mark.parametrize("value", ["hi", "Hello!", "HEY", "Good morning"])
 def test_simple_greetings_do_not_start_research(value):
-    assert _is_greeting(value)
+    assert is_greeting(value)
 
 
 def test_question_with_a_greeting_still_starts_research():
-    assert not _is_greeting("Hi, what caused the fire?")
+    assert not is_greeting("Hi, what caused the fire?")
 
 
 def test_upload_mode_labels_remain_explicit():

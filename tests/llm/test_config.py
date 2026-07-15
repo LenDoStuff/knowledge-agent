@@ -1,3 +1,5 @@
+"""Tests for LLM profile configuration."""
+
 import pytest
 
 from knowledge_agent.config import ConfigurationError, load_profile

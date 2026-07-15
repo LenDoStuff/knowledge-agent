@@ -26,12 +26,17 @@ from knowledge_agent.claims.config import (
 from knowledge_agent.claims.embeddings import SnowflakeAiEmbedder
 from knowledge_agent.claims.filesystem import read_json, write_claim_manifest
 from knowledge_agent.claims.lightrag import (
+    LLM_CACHE_FILE,
     embedding_spec,
     index_lightrag_chunks,
     open_lightrag_resource,
     validate_lightrag_index,
 )
-from knowledge_agent.claims.models import ClaimManifest, KnowledgeBaseEngine
+from knowledge_agent.claims.models import (
+    ClaimManifest,
+    KnowledgeBaseEngine,
+    RetrievalMode,
+)
 from knowledge_agent.claims.ocr import AzureDocumentIntelligenceOcrClient
 from knowledge_agent.claims.pipeline import IngestionServices
 from knowledge_agent.claims.store import ClaimStore, load_claim_store
@@ -39,6 +44,9 @@ from knowledge_agent.claims.vector_store import ChromaVectorStore
 from knowledge_agent.config import ConfigurationError
 from knowledge_agent.llm.config import LlmSettings
 from knowledge_agent.llm.providers import open_agent_runtime
+
+
+LIGHTRAG_REBUILD_CACHE_FILE = ".lightrag-rebuild-cache.json"
 
 
 @contextmanager
@@ -60,7 +68,7 @@ def live_ingestion_services(
             credential = AzureKeyCredential(
                 cast(str, settings.document_intelligence_api_key)
             )
-            retrieval_mode = "lexical"
+            custom_mode: RetrievalMode = "lexical"
         else:
             if runtime.azure_project is None or runtime.azure_credential is None:
                 raise ConfigurationError(
@@ -80,20 +88,21 @@ def live_ingestion_services(
                 require_custom_subdomain=True,
             )
             credential = runtime.azure_credential
-            retrieval_mode = "semantic"
+            custom_mode = "semantic"
             embedder = SnowflakeAiEmbedder(
                 settings.snowflake_connection_name,
                 settings.snowflake_embedding_model,
             )
             resources.callback(embedder.close)
+
             def vector_store_factory(root: Path) -> ChromaVectorStore:
                 return ChromaVectorStore(
                     claim_id,
                     root / "index" / "chroma",
                 )
 
-        if knowledge_base == "lightrag":
-            retrieval_mode = "lightrag"
+        retrieval_modes = _retrieval_modes(knowledge_base, custom_mode)
+        if "lightrag" in retrieval_modes:
             selected_spec = embedding_spec(
                 llm_settings,
                 settings.snowflake_embedding_model,
@@ -119,7 +128,8 @@ def live_ingestion_services(
             extract_document_metadata=partial(extract_document_metadata, runtime),
             embedder=embedder,
             vector_store_factory=vector_store_factory,
-            retrieval_mode=retrieval_mode,
+            retrieval_mode=retrieval_modes[0],
+            additional_retrieval_modes=retrieval_modes[1:],
             lightrag_indexer=lightrag_indexer,
             embedding_provider=(selected_spec.provider if selected_spec else None),
             embedding_model=(selected_spec.model if selected_spec else None),
@@ -131,6 +141,7 @@ def open_claim_store(
     claim_path: str | Path,
     settings: ClaimSettings,
     *,
+    retrieval_mode: RetrievalMode | None = None,
     runtime=None,
     llm_settings: LlmSettings | None = None,
 ) -> Iterator[ClaimStore]:
@@ -139,11 +150,17 @@ def open_claim_store(
     if not isinstance(manifest_data, dict):
         raise ValueError("manifest.json must contain a JSON object")
     manifest = ClaimManifest.model_validate(manifest_data)
-    if manifest.retrieval_mode == "lexical":
-        yield load_claim_store(claim_path)
+    selected_mode = retrieval_mode or manifest.retrieval_mode
+    if selected_mode not in manifest.available_retrieval_modes:
+        raise ValueError(
+            f"Retrieval mode {selected_mode!r} is not available for "
+            f"claim {manifest.claim_id}"
+        )
+    if selected_mode == "lexical":
+        yield load_claim_store(claim_path, retrieval_mode=selected_mode)
         return
 
-    if manifest.retrieval_mode == "lightrag":
+    if selected_mode == "lightrag":
         if runtime is None or llm_settings is None:
             raise ConfigurationError(
                 "LightRAG claims require an AgentRuntime and LLM settings"
@@ -183,7 +200,11 @@ def open_claim_store(
                     metadata=metadata,
                 )
             )
-            yield load_claim_store(claim_path, lightrag=lightrag)
+            yield load_claim_store(
+                claim_path,
+                retrieval_mode=selected_mode,
+                lightrag=lightrag,
+            )
         return
 
     require_semantic_retrieval_settings(settings)
@@ -204,6 +225,7 @@ def open_claim_store(
         resources.callback(vector_store.close)
         yield load_claim_store(
             claim_path,
+            retrieval_mode=selected_mode,
             embedder=embedder,
             vector_store=vector_store,
         )
@@ -218,22 +240,57 @@ def rebuild_claim_knowledge_base(
     """Rebuild only the retrieval index from persisted claim chunks."""
 
     claim_path = Path(claim_path)
-    store = load_claim_store(claim_path)
+    store = load_claim_store(claim_path, validate_index=False)
     staging_root = Path(mkdtemp(prefix=".index-build-", dir=claim_path))
+    rebuild_cache_path = claim_path / LIGHTRAG_REBUILD_CACHE_FILE
     try:
-        if target == "lightrag":
+        custom_mode: RetrievalMode = (
+            "lexical" if llm_settings.profile == "api_key" else "semantic"
+        )
+        retrieval_modes = _retrieval_modes(target, custom_mode)
+        selected_spec = None
+        if "lightrag" in retrieval_modes:
             selected_spec = embedding_spec(
                 llm_settings,
                 settings.snowflake_embedding_model,
             )
-            with open_agent_runtime(llm_settings) as runtime, ExitStack() as resources:
-                embedder = None
-                if selected_spec.provider == "snowflake":
-                    embedder = SnowflakeAiEmbedder(
-                        settings.snowflake_connection_name,
-                        selected_spec.model,
-                    )
-                    resources.callback(embedder.close)
+
+        with ExitStack() as resources:
+            embedder = None
+            if "semantic" in retrieval_modes or (
+                selected_spec is not None and selected_spec.provider == "snowflake"
+            ):
+                require_semantic_retrieval_settings(settings)
+                embedding_model = (
+                    selected_spec.model
+                    if selected_spec is not None
+                    else settings.snowflake_embedding_model
+                )
+                embedder = SnowflakeAiEmbedder(
+                    settings.snowflake_connection_name,
+                    embedding_model,
+                )
+                resources.callback(embedder.close)
+
+            if "semantic" in retrieval_modes:
+                if embedder is None:
+                    raise ValueError("semantic retrieval requires an embedder")
+                embeddings = embedder.embed_texts(
+                    [chunk.text for chunk in store.chunks]
+                )
+                vector_store = ChromaVectorStore(
+                    store.manifest.claim_id,
+                    staging_root / "index" / "chroma",
+                )
+                try:
+                    vector_store.index_chunks(store.chunks, embeddings)
+                finally:
+                    vector_store.close()
+
+            if "lightrag" in retrieval_modes:
+                if selected_spec is None:
+                    raise ValueError("LightRAG retrieval requires an embedding spec")
+                runtime = resources.enter_context(open_agent_runtime(llm_settings))
                 index_lightrag_chunks(
                     runtime,
                     llm_settings,
@@ -242,60 +299,79 @@ def rebuild_claim_knowledge_base(
                     store.chunks,
                     selected_spec,
                     snowflake_embedder=embedder,
+                    seed_cache_path=_lightrag_seed_cache_path(
+                        claim_path,
+                        rebuild_cache_path,
+                    ),
                 )
-            manifest = ClaimManifest.model_validate(
-                store.manifest.model_dump()
-                | {
-                    "retrieval_mode": "lightrag",
-                    "embedding_provider": selected_spec.provider,
-                    "embedding_model": selected_spec.model,
-                }
-            )
+
+        if selected_spec is not None:
+            embedding_provider = selected_spec.provider
+            embedding_model = selected_spec.model
+        elif "semantic" in retrieval_modes:
+            embedding_provider = "snowflake"
+            embedding_model = settings.snowflake_embedding_model
+        else:
+            embedding_provider = None
+            embedding_model = None
+
+        manifest = ClaimManifest.model_validate(
+            store.manifest.model_dump()
+            | {
+                "retrieval_mode": retrieval_modes[0],
+                "additional_retrieval_modes": list(retrieval_modes[1:]),
+                "embedding_provider": embedding_provider,
+                "embedding_model": embedding_model,
+            }
+        )
+        if "lightrag" in retrieval_modes:
             validate_lightrag_index(
                 staging_root / "index" / "lightrag",
                 manifest,
             )
-        elif llm_settings.profile == "api_key":
-            manifest = ClaimManifest.model_validate(
-                store.manifest.model_dump()
-                | {
-                    "retrieval_mode": "lexical",
-                    "embedding_provider": None,
-                    "embedding_model": None,
-                }
-            )
-        else:
-            embedder = SnowflakeAiEmbedder(
-                settings.snowflake_connection_name,
-                settings.snowflake_embedding_model,
-            )
-            try:
-                embeddings = embedder.embed_texts(
-                    [chunk.text for chunk in store.chunks]
-                )
-            finally:
-                embedder.close()
-            vector_store = ChromaVectorStore(
-                store.manifest.claim_id,
-                staging_root / "index" / "chroma",
-            )
-            try:
-                vector_store.index_chunks(store.chunks, embeddings)
-            finally:
-                vector_store.close()
-            manifest = ClaimManifest.model_validate(
-                store.manifest.model_dump()
-                | {
-                    "retrieval_mode": "semantic",
-                    "embedding_provider": "snowflake",
-                    "embedding_model": settings.snowflake_embedding_model,
-                }
-            )
 
         _commit_rebuilt_index(claim_path, staging_root / "index", manifest)
+        rebuild_cache_path.unlink(missing_ok=True)
         return manifest
+    except Exception:
+        _preserve_lightrag_rebuild_cache(staging_root, rebuild_cache_path)
+        raise
     finally:
         shutil.rmtree(staging_root, ignore_errors=True)
+
+
+def _lightrag_seed_cache_path(
+    claim_path: Path,
+    rebuild_cache_path: Path,
+) -> Path:
+    if rebuild_cache_path.exists():
+        return rebuild_cache_path
+    return claim_path / "index" / "lightrag" / LLM_CACHE_FILE
+
+
+def _preserve_lightrag_rebuild_cache(
+    staging_root: Path,
+    rebuild_cache_path: Path,
+) -> None:
+    staged_cache = staging_root / "index" / "lightrag" / LLM_CACHE_FILE
+    if not staged_cache.exists():
+        return
+    temporary_path = rebuild_cache_path.with_suffix(rebuild_cache_path.suffix + ".tmp")
+    shutil.copy2(staged_cache, temporary_path)
+    temporary_path.replace(rebuild_cache_path)
+
+
+def _retrieval_modes(
+    knowledge_base: KnowledgeBaseEngine,
+    custom_mode: RetrievalMode,
+) -> tuple[RetrievalMode, ...]:
+    if knowledge_base == "custom":
+        return (custom_mode,)
+    if knowledge_base == "lightrag":
+        return ("lightrag",)
+    if knowledge_base == "both":
+        return (custom_mode, "lightrag")
+    raise ValueError(f"Unknown knowledge-base engine: {knowledge_base}")
 
 
 def _commit_rebuilt_index(

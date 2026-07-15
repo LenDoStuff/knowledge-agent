@@ -1,3 +1,5 @@
+"""Tests for research CLI arguments and logging."""
+
 import logging
 
 from knowledge_agent.research.cli import build_parser, configure_logging

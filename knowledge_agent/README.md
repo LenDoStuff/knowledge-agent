@@ -9,13 +9,13 @@ used for classification and cited research.
 
 - `config.py` loads the deployment profile and validates simple environment
   values shared by the app.
-- `app.py` is the Streamlit workbench for upload, ingestion, claim inspection,
-  and research chat.
+- `app.py` composes the Streamlit page and sidebar.
+- `ui/` owns upload handling, claim views, and research interaction rendering.
 - `agents/` owns AI prompts, structured contracts, tools, validation, and
   PydanticAI agent code.
 - `claims/` owns persisted claim knowledge bases.
 - `llm/` owns PydanticAI provider setup and runtime resources.
-- `research/` owns the research CLI.
+- `research/` owns research-history persistence and the research CLI.
 
 Dependencies should stay straightforward: agent packages may use `claims` and
 `llm`; `claims` composes the document-classifier agent for ingestion; `llm`
@@ -30,9 +30,10 @@ The active deployment profile comes from `KNOWLEDGE_AGENT_PROFILE`:
 - `azure_project` uses PydanticAI with Azure AI Projects, Document Intelligence,
   Snowflake Cortex embeddings, and Chroma semantic retrieval.
 
-Both profiles can select embedded LightRAG instead of the custom engine. It
-indexes the existing claim chunks, keeps citation IDs stable, and returns
-structured evidence to the same Pydantic Deep researcher.
+Both profiles can create the Custom engine, embedded LightRAG, or both. Each
+index uses the existing claim chunks and stable citation IDs. When both exist,
+each Streamlit research interaction explicitly selects one engine and persists
+that choice in its audit snapshot.
 
 The Streamlit app and CLIs use the same `.env`-driven configuration. Keep
 credentials server-side; the UI should not ask users to paste secrets.

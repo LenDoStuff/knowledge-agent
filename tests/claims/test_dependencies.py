@@ -1,3 +1,5 @@
+"""Tests for live claim dependency composition."""
+
 from contextlib import contextmanager
 import json
 from pathlib import Path
@@ -8,7 +10,10 @@ import pytest
 from azure.core.credentials import AzureKeyCredential
 
 from knowledge_agent.claims.config import ClaimSettings
-from knowledge_agent.claims.dependencies import live_ingestion_services, open_claim_store
+from knowledge_agent.claims.dependencies import (
+    live_ingestion_services,
+    open_claim_store,
+)
 from knowledge_agent.claims.store import search_claim
 from knowledge_agent.config import ConfigurationError
 from knowledge_agent.llm.config import LlmSettings
@@ -129,9 +134,37 @@ def test_api_key_profile_builds_lightrag_without_new_credentials(monkeypatch):
     ) as services:
         assert services.retrieval_mode == "lightrag"
         assert services.embedding_provider == "nvidia"
-        assert services.embedding_model == "baai/bge-m3"
+        assert services.embedding_model == "nvidia/llama-nemotron-embed-1b-v2"
         assert callable(services.lightrag_indexer)
         assert services.embedder is None
+
+    assert ocr.closed
+
+
+def test_api_key_profile_can_build_custom_and_lightrag_together(monkeypatch):
+    ocr = FakeResource()
+    monkeypatch.setattr(
+        "knowledge_agent.claims.dependencies.open_agent_runtime",
+        runtime_context(SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        "knowledge_agent.claims.dependencies.AzureDocumentIntelligenceOcrClient",
+        lambda endpoint, credential: ocr,
+    )
+
+    with live_ingestion_services(
+        "CLM-BOTH",
+        claim_settings(
+            document_intelligence_endpoint="https://example.cognitiveservices.azure.com",
+            document_intelligence_api_key="secret-document-key",
+        ),
+        api_key_llm_settings(),
+        "both",
+    ) as services:
+        assert services.retrieval_mode == "lexical"
+        assert services.additional_retrieval_modes == ("lightrag",)
+        assert callable(services.lightrag_indexer)
+        assert services.embedding_provider == "nvidia"
 
     assert ocr.closed
 
@@ -139,10 +172,10 @@ def test_api_key_profile_builds_lightrag_without_new_credentials(monkeypatch):
 def test_azure_project_profile_builds_snowflake_and_chroma(monkeypatch):
     connection_calls = []
     connections = SimpleNamespace(
-        get=lambda name, include_credentials: connection_calls.append(
-            (name, include_credentials)
+        get=lambda name, include_credentials: (
+            connection_calls.append((name, include_credentials))
+            or SimpleNamespace(target="https://documents.cognitiveservices.azure.com")
         )
-        or SimpleNamespace(target="https://documents.cognitiveservices.azure.com")
     )
     project = SimpleNamespace(connections=connections)
     credential = FakeResource()

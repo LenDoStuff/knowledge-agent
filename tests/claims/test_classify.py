@@ -1,3 +1,5 @@
+"""Tests for document classification and metadata extraction agents."""
+
 import asyncio
 import logging
 from contextlib import contextmanager

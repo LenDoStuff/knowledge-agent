@@ -1,3 +1,5 @@
+"""Tests for Snowflake embedding result normalization."""
+
 from knowledge_agent.claims.embeddings import SnowflakeAiEmbedder
 
 

@@ -18,7 +18,7 @@ async def search_claim_evidence(
         raise ValueError("query cannot be empty")
     if top_k < 1:
         raise ValueError("top_k must be at least 1")
-    if store.manifest.retrieval_mode == "lightrag":
+    if store.retrieval_mode == "lightrag":
         if store.lightrag is None:
             raise RuntimeError("LightRAG claim store requires retrieval dependencies")
         chunk_ids = await store.lightrag.retrieve_chunk_ids(query, top_k)

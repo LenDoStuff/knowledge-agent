@@ -63,6 +63,7 @@ class IngestionServices:
     embedder: TextEmbedder | None
     vector_store_factory: Callable[[Path], VectorStore] | None
     retrieval_mode: RetrievalMode
+    additional_retrieval_modes: tuple[RetrievalMode, ...] = ()
     lightrag_indexer: Callable[[Path, list[DocumentChunk]], object] | None = None
     embedding_provider: str | None = None
     embedding_model: str | None = None
@@ -265,6 +266,10 @@ def _complete_ingestion(
     log: IngestionLog,
     locked_document_types: bool,
 ) -> ClaimManifest:
+    retrieval_modes = {
+        services.retrieval_mode,
+        *services.additional_retrieval_modes,
+    }
     with log_step(log, "chunk", root):
         chunks = chunk_documents(claim_id, logical_documents)
 
@@ -277,7 +282,7 @@ def _complete_ingestion(
         )
 
     embeddings: list[list[float]] = []
-    if services.retrieval_mode == "semantic":
+    if "semantic" in retrieval_modes:
         if services.embedder is None:
             raise ValueError("semantic retrieval requires an embedder")
         with log_step(log, "embed", root):
@@ -291,18 +296,18 @@ def _complete_ingestion(
             [chunk.model_dump(mode="json") for chunk in chunks],
         )
 
-    if services.retrieval_mode == "semantic":
+    if "semantic" in retrieval_modes:
         vector_store_factory = services.vector_store_factory
         if vector_store_factory is None:
             raise ValueError("semantic retrieval requires a vector store factory")
         with log_step(log, "index", root):
             _index_chunks(root, chunks, embeddings, vector_store_factory)
-    elif services.retrieval_mode == "lightrag":
+    if "lightrag" in retrieval_modes:
         if services.lightrag_indexer is None:
             raise ValueError("LightRAG retrieval requires an indexer")
         with log_step(log, "lightrag_index", root):
             services.lightrag_indexer(root / "index" / "lightrag", chunks)
-    else:
+    if retrieval_modes == {"lexical"}:
         with log_step(log, "clear_vector_index", root):
             _clear_vector_index(root)
 
@@ -393,7 +398,13 @@ def _build_manifest(
     services: IngestionServices,
 ) -> ClaimManifest:
     embedder = services.embedder
-    uses_embeddings = services.retrieval_mode in {"semantic", "lightrag"}
+    uses_embeddings = any(
+        mode in {"semantic", "lightrag"}
+        for mode in (
+            services.retrieval_mode,
+            *services.additional_retrieval_modes,
+        )
+    )
     return ClaimManifest(
         claim_id=claim_id,
         source_files=[path.relative_to(root).as_posix() for path in source_files],
@@ -408,6 +419,7 @@ def _build_manifest(
             or (embedder.embedding_model if uses_embeddings and embedder else None)
         ),
         retrieval_mode=services.retrieval_mode,
+        additional_retrieval_modes=list(services.additional_retrieval_modes),
     )
 
 

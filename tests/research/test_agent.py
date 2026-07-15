@@ -1,3 +1,5 @@
+"""Tests for planning and claim-research deep agents."""
+
 import asyncio
 from contextlib import contextmanager
 from dataclasses import replace
@@ -497,6 +499,7 @@ def test_lightrag_keyword_usage_is_aggregated_with_deep_agent_usage():
     lightrag_store = replace(
         store,
         manifest=manifest,
+        retrieval_mode="lightrag",
         lightrag=cast(Any, Retriever()),
     )
     calls = 0

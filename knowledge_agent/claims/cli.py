@@ -27,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     input_group.add_argument("--folder-path")
     parser.add_argument(
         "--knowledge-base",
-        choices=["custom", "lightrag"],
+        choices=["custom", "lightrag", "both"],
         default="custom",
     )
     parser.add_argument(

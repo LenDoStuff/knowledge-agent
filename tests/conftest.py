@@ -1,3 +1,5 @@
+"""Shared safeguards for deterministic tests without live model requests."""
+
 import pytest
 from pydantic_ai import models
 

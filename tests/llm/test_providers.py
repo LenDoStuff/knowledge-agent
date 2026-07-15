@@ -1,3 +1,5 @@
+"""Tests for PydanticAI provider models and runtime ownership."""
+
 import asyncio
 
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIResponsesModel

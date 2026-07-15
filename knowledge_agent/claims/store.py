@@ -21,6 +21,7 @@ from knowledge_agent.claims.models import (
     DocumentChunk,
     DocumentMetadata,
     PageText,
+    RetrievalMode,
 )
 from knowledge_agent.claims.vector_store import VectorStore
 
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
 class ClaimStore:
     output_path: Path
     manifest: ClaimManifest
+    retrieval_mode: RetrievalMode
     documents: list[DocumentMetadata]
     pages: list[PageText]
     chunks: list[DocumentChunk]
@@ -46,6 +48,8 @@ class ClaimStore:
 def load_claim_store(
     output_path: str | Path,
     *,
+    retrieval_mode: RetrievalMode | None = None,
+    validate_index: bool = True,
     embedder: TextEmbedder | None = None,
     vector_store: VectorStore | None = None,
     lightrag: LightRagResource | None = None,
@@ -55,7 +59,13 @@ def load_claim_store(
     if not isinstance(manifest_data, dict):
         raise ValueError("manifest.json must contain a JSON object")
     manifest = ClaimManifest.model_validate(manifest_data)
-    if manifest.retrieval_mode == "lightrag":
+    selected_mode = retrieval_mode or manifest.retrieval_mode
+    if selected_mode not in manifest.available_retrieval_modes:
+        raise ValueError(
+            f"Retrieval mode {selected_mode!r} is not available for "
+            f"claim {manifest.claim_id}"
+        )
+    if selected_mode == "lightrag" and validate_index:
         from knowledge_agent.claims.lightrag import validate_lightrag_index
 
         validate_lightrag_index(output_path / "index" / "lightrag", manifest)
@@ -70,6 +80,7 @@ def load_claim_store(
     store = ClaimStore(
         output_path=output_path,
         manifest=manifest,
+        retrieval_mode=selected_mode,
         documents=manifest.documents,
         pages=pages,
         chunks=chunks,
@@ -97,12 +108,12 @@ def search_claim(
     if top_k < 1:
         raise ValueError("top_k must be at least 1")
 
-    if store.manifest.retrieval_mode == "lightrag":
+    if store.retrieval_mode == "lightrag":
         raise RuntimeError(
             "LightRAG retrieval is asynchronous; use search_claim_evidence"
         )
 
-    if store.manifest.retrieval_mode == "semantic":
+    if store.retrieval_mode == "semantic":
         if store.embedder is None or store.vector_store is None:
             raise RuntimeError("semantic claim store requires retrieval dependencies")
         query_embedding = store.embedder.embed_texts([query])[0]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol, Sequence
 
+
 class TextEmbedder(Protocol):
     embedding_provider: str
     embedding_model: str

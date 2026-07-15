@@ -1,3 +1,5 @@
+"""Opt-in live contracts for configured LLM providers."""
+
 import os
 from pathlib import Path
 

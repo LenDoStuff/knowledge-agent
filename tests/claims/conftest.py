@@ -1,3 +1,5 @@
+"""Reusable persisted-claim fixtures for claims-package tests."""
+
 from pathlib import Path
 
 import pytest

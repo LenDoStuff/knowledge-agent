@@ -11,7 +11,8 @@ knowledge_agent/
   agents/    # classifier/researcher prompts, models, tools, workflows
   llm/       # PydanticAI provider configuration and runtime
   claims/    # ingestion, persistence, custom/LightRAG retrieval
-  research/  # research CLI
+  research/  # research history and CLI
+  ui/        # Streamlit claim, knowledge-base, report, and research views
 ```
 
 AI behavior lives under `agents/`: the document classifier supports ingestion,
@@ -29,10 +30,10 @@ prompts stay in their owning agent packages.
   Document Intelligence connection, Snowflake Cortex embeddings, and Chroma
   semantic retrieval.
 
-Either profile can instead build an embedded LightRAG knowledge base. LightRAG
-reuses the selected profile's LLM through PydanticAI; `api_key` uses NVIDIA
-`baai/bge-m3` embeddings and `azure_project` uses the configured Snowflake
-embedding model.
+Either profile can build Custom, embedded LightRAG, or both knowledge bases from
+the same persisted chunks. LightRAG reuses the selected profile's LLM through
+PydanticAI; `api_key` uses NVIDIA `nvidia/llama-nemotron-embed-1b-v2`
+embeddings and `azure_project` uses the configured Snowflake embedding model.
 
 Copy `.env.example` to `.env` and fill in the selected profile's values.
 
@@ -42,7 +43,7 @@ Copy `.env.example` to `.env` and fill in the selected profile's values.
 python -m knowledge_agent.claims.cli `
   --claim-id CLM-001 `
   --folder-path examples/claims/sample_input `
-  --knowledge-base lightrag
+  --knowledge-base both
 ```
 
 Use `--pdf-path` instead when one PDF contains several logical documents. Output
@@ -58,10 +59,11 @@ python -m knowledge_agent.research.cli `
   --question "What repairs were invoiced?"
 ```
 
-Research opens the retrieval strategy recorded in `manifest.json`: lexical
-claims remain fully local, semantic claims use Snowflake/Chroma, and LightRAG
-claims use their embedded graph and vector stores. All paths return identical
-page IDs and `source_ref` citations to the Pydantic Deep research loop.
+The CLI opens the default retrieval strategy recorded in `manifest.json`:
+lexical claims remain fully local, semantic claims use Snowflake/Chroma, and
+LightRAG claims use their embedded graph and vector stores. Streamlit lets the
+user choose Custom or LightRAG for each new report when both are present. All
+paths return identical page IDs and `source_ref` citations.
 
 Research logs append to `logs/research.log`. `DEBUG` logging includes prompts,
 claim-search evidence, native usage, and answers.
@@ -79,9 +81,10 @@ Select an existing claim from `CLAIM_DATA_ROOT`, or ingest either one combined
 claim PDF or several already-separated document PDFs from the sidebar. The
 knowledge-base tab shows document metadata, parties, events, evidence chunks,
 OCR page text, an aggregate timeline, a claim-wide party list, and exact source
-references. LightRAG claims also expose searchable entity and relationship
-tables. A protected rebuild action can switch engines from persisted chunks
-without rerunning OCR. The chat tab researches only the selected claim, keeps its
+references. LightRAG indexes also expose searchable entity and relationship
+tables. A protected rebuild action can create Custom, LightRAG, or both from
+persisted chunks without rerunning OCR. The chat tab researches only the selected
+claim and selected engine, keeps its
 independent report history under that claim, annotates answers with
 source tooltips, and exposes native retrieval tool calls and model usage.
 Planning mode clarifies scope and pauses for approval before searching. Reports,

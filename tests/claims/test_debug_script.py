@@ -1,3 +1,5 @@
+"""Tests for the documented claim-debugging walkthrough."""
+
 from __future__ import annotations
 
 from contextlib import contextmanager

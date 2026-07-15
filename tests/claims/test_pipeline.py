@@ -1,3 +1,5 @@
+"""Tests for combined and separated claim-ingestion flows."""
+
 from pathlib import Path
 from threading import Barrier, Lock
 
@@ -255,6 +257,8 @@ def ingestion_services(
     embedder,
     vector_store_factory,
     retrieval_mode,
+    additional_retrieval_modes=(),
+    lightrag_indexer=None,
 ) -> IngestionServices:
     return IngestionServices(
         ocr_client=ocr_client,
@@ -264,6 +268,8 @@ def ingestion_services(
         embedder=embedder,
         vector_store_factory=vector_store_factory,
         retrieval_mode=retrieval_mode,
+        additional_retrieval_modes=additional_retrieval_modes,
+        lightrag_indexer=lightrag_indexer,
     )
 
 
@@ -375,6 +381,40 @@ def test_lexical_ingestion_skips_embeddings_and_clears_index(
         "clear_vector_index",
         "claim_manifest",
     ]
+
+
+def test_ingestion_can_build_custom_and_lightrag_from_the_same_chunks(
+    tmp_path,
+    sample_pdf,
+):
+    vector_store = FakeVectorStore()
+    lightrag_calls = []
+    services = ingestion_services(
+        ocr_client=FakeOcrClient(),
+        classifier=FakeClassifier(),
+        embedder=FakeEmbedder(),
+        vector_store_factory=lambda root: vector_store,
+        retrieval_mode="semantic",
+        additional_retrieval_modes=("lightrag",),
+        lightrag_indexer=lambda path, chunks: lightrag_calls.append(
+            (path, list(chunks))
+        ),
+    )
+
+    manifest = ingest_claim_pdf(
+        claim_id="CLM-BOTH",
+        pdf_path=sample_pdf,
+        data_root=tmp_path / "claims",
+        services=services,
+    )
+
+    assert manifest.available_retrieval_modes == ("semantic", "lightrag")
+    assert [chunk.chunk_id for chunk in vector_store.indexed_chunks] == [
+        chunk.chunk_id for chunk in lightrag_calls[0][1]
+    ]
+    assert lightrag_calls[0][0] == (
+        tmp_path / "claims" / "CLM-BOTH" / "index" / "lightrag"
+    )
 
 
 def test_folder_ingestion_ocr_classifies_sorts_and_preserves_pdfs(tmp_path):

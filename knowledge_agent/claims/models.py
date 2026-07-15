@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 RetrievalMode = Literal["lexical", "semantic", "lightrag"]
-KnowledgeBaseEngine = Literal["custom", "lightrag"]
+KnowledgeBaseEngine = Literal["custom", "lightrag", "both"]
 
 
 def utc_now() -> datetime:
@@ -149,20 +149,24 @@ class ClaimManifest(BaseModel):
     documents: list[DocumentMetadata]
     chunk_count: int
     retrieval_mode: RetrievalMode
+    additional_retrieval_modes: list[RetrievalMode] = Field(default_factory=list)
     embedding_provider: str | None = None
     embedding_model: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
     @model_validator(mode="after")
     def validate_retrieval_settings(self) -> "ClaimManifest":
-        if self.retrieval_mode in {"semantic", "lightrag"} and (
+        modes = self.available_retrieval_modes
+        if len(modes) != len(set(modes)):
+            raise ValueError("claim retrieval modes must be unique")
+        if any(mode in {"semantic", "lightrag"} for mode in modes) and (
             not self.embedding_provider or not self.embedding_model
         ):
             raise ValueError(
-                f"{self.retrieval_mode} retrieval requires embedding_provider "
+                "semantic and LightRAG retrieval require embedding_provider "
                 "and embedding_model"
             )
-        if self.retrieval_mode == "lexical" and (
+        if modes == ("lexical",) and (
             self.embedding_provider is not None or self.embedding_model is not None
         ):
             raise ValueError(
@@ -174,3 +178,7 @@ class ClaimManifest(BaseModel):
                 if not event.source_ref.startswith(prefix):
                     raise ValueError(f"event source_ref must start with {prefix}")
         return self
+
+    @property
+    def available_retrieval_modes(self) -> tuple[RetrievalMode, ...]:
+        return (self.retrieval_mode, *self.additional_retrieval_modes)

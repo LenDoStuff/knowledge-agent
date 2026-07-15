@@ -1,5 +1,8 @@
-from pathlib import Path
+"""Tests for persisted claim loading and retrieval."""
+
+import json
 import shutil
+from pathlib import Path
 
 import pytest
 
@@ -17,6 +20,22 @@ from knowledge_agent.claims.vector_store import ChromaVectorStore, VectorSearchH
 SAMPLE_OUTPUT = (
     Path(__file__).parents[2] / "examples" / "claims" / "sample_output"
 )
+
+
+def set_retrieval_manifest(
+    claim_path: Path,
+    mode: str,
+    provider: str,
+    model: str,
+) -> None:
+    manifest_path = claim_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(
+        retrieval_mode=mode,
+        embedding_provider=provider,
+        embedding_model=model,
+    )
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
 
 def test_sample_output_has_stable_citation_fields():
@@ -104,13 +123,7 @@ def test_semantic_store_returns_the_same_citation_rich_result_shape(tmp_path):
 
     claim_path = tmp_path / "claim"
     shutil.copytree(SAMPLE_OUTPUT, claim_path)
-    manifest_path = claim_path / "manifest.json"
-    original = manifest_path.read_text(encoding="utf-8")
-    semantic = original.replace(
-        '"retrieval_mode": "lexical",\n  "embedding_provider": null,\n  "embedding_model": null',
-        '"retrieval_mode": "semantic",\n  "embedding_provider": "snowflake",\n  "embedding_model": "test-model"',
-    )
-    manifest_path.write_text(semantic, encoding="utf-8")
+    set_retrieval_manifest(claim_path, "semantic", "snowflake", "test-model")
     store = load_claim_store(
         claim_path,
         embedder=FakeEmbedder(),
@@ -125,12 +138,7 @@ def test_semantic_store_returns_the_same_citation_rich_result_shape(tmp_path):
 def test_semantic_store_queries_a_real_chroma_index(tmp_path):
     claim_path = tmp_path / "claim"
     shutil.copytree(SAMPLE_OUTPUT, claim_path)
-    manifest_path = claim_path / "manifest.json"
-    semantic = manifest_path.read_text(encoding="utf-8").replace(
-        '"retrieval_mode": "lexical",\n  "embedding_provider": null,\n  "embedding_model": null',
-        '"retrieval_mode": "semantic",\n  "embedding_provider": "snowflake",\n  "embedding_model": "test-model"',
-    )
-    manifest_path.write_text(semantic, encoding="utf-8")
+    set_retrieval_manifest(claim_path, "semantic", "snowflake", "test-model")
 
     class FakeEmbedder:
         embedding_provider = "snowflake"
@@ -165,12 +173,27 @@ def test_semantic_store_queries_a_real_chroma_index(tmp_path):
 def test_lightrag_store_rejects_a_missing_index(tmp_path):
     claim_path = tmp_path / "claim"
     shutil.copytree(SAMPLE_OUTPUT, claim_path)
-    manifest_path = claim_path / "manifest.json"
-    lightrag = manifest_path.read_text(encoding="utf-8").replace(
-        '"retrieval_mode": "lexical",\n  "embedding_provider": null,\n  "embedding_model": null',
-        '"retrieval_mode": "lightrag",\n  "embedding_provider": "nvidia",\n  "embedding_model": "baai/bge-m3"',
-    )
-    manifest_path.write_text(lightrag, encoding="utf-8")
+    set_retrieval_manifest(claim_path, "lightrag", "nvidia", "baai/bge-m3")
 
     with pytest.raises(FileNotFoundError, match="metadata"):
         load_claim_store(claim_path)
+
+
+def test_store_selects_one_of_two_persisted_retrieval_modes(tmp_path):
+    claim_path = tmp_path / "claim"
+    shutil.copytree(SAMPLE_OUTPUT, claim_path)
+    manifest_path = claim_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(
+        additional_retrieval_modes=["lightrag"],
+        embedding_provider="nvidia",
+        embedding_model="baai/bge-m3",
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    custom = load_claim_store(claim_path, retrieval_mode="lexical")
+    assert custom.retrieval_mode == "lexical"
+    with pytest.raises(FileNotFoundError, match="metadata"):
+        load_claim_store(claim_path, retrieval_mode="lightrag")
+    with pytest.raises(ValueError, match="not available"):
+        load_claim_store(claim_path, retrieval_mode="semantic")

@@ -1,3 +1,5 @@
+"""Tests for chunk and vector storage behavior."""
+
 from knowledge_agent.claims.models import DocumentChunk, PageRange
 from knowledge_agent.claims.vector_store import ChromaVectorStore
 

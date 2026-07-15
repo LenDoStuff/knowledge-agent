@@ -1,3 +1,5 @@
+"""Tests for persisted claim model invariants."""
+
 import pytest
 from pydantic import ValidationError
 
@@ -138,4 +140,25 @@ def test_manifest_requires_embedding_metadata_for_embedding_retrieval(retrieval_
                 "chunk_count": 0,
                 "retrieval_mode": retrieval_mode,
             }
+        )
+
+
+def test_manifest_supports_two_unique_retrieval_modes():
+    manifest = ClaimManifest(
+        claim_id="CLM-001",
+        source_files=["claim.pdf"],
+        documents=[],
+        chunk_count=0,
+        retrieval_mode="lexical",
+        additional_retrieval_modes=["lightrag"],
+        embedding_provider="nvidia",
+        embedding_model="baai/bge-m3",
+    )
+
+    assert manifest.available_retrieval_modes == ("lexical", "lightrag")
+
+    with pytest.raises(ValidationError, match="must be unique"):
+        ClaimManifest.model_validate(
+            manifest.model_dump()
+            | {"additional_retrieval_modes": ["lexical"]}
         )
