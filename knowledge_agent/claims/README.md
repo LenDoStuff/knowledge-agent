@@ -45,9 +45,13 @@ python -m knowledge_agent.claims.cli `
   --log-level DEBUG
 ```
 
-`--knowledge-base custom` is the default: `api_key` produces lexical claims and
-`azure_project` produces Snowflake/Chroma semantic claims. `--knowledge-base
-lightrag` builds an embedded claim-local LightRAG index using the existing
+`--knowledge-base custom` is the default: `api_key` produces lexical claims;
+`azure_project` and `snowflake` produce Snowflake/Chroma semantic claims. The
+Snowflake profile uses `AI_PARSE_DOCUMENT` in OCR mode with page splitting.
+It creates the configured internal stage if needed, uploads each PDF under a
+unique temporary prefix, and removes staged evidence after every call. Stage
+creation, parsing, validation, and cleanup failures are surfaced.
+`--knowledge-base lightrag` builds an embedded claim-local LightRAG index using the existing
 provider credentials. `--knowledge-base both` builds both indexes from the same
 chunks. LightRAG indexing performs additional LLM and embedding calls.
 NVIDIA uses `nvidia/llama-nemotron-embed-1b-v2` at 1,024 dimensions and an
@@ -120,6 +124,12 @@ retries disabled. Embedding requests alone use up to three visible retries for
 transient HTTP 429/5xx responses.
 `open_claim_store(..., retrieval_mode=...)` selects one available mode for a
 research run; it never silently switches engines.
+
+Snowflake account context comes from the named `connections.toml` entry. The
+profile requires a current database and schema, permission to create its managed
+stage, and `SNOWFLAKE.CORTEX_USER`. Cortex model inference additionally uses the
+separate `SNOWFLAKE_CORTEX_PAT` bearer secret; credentials are never persisted
+inside claim artifacts.
 
 Custom store example:
 

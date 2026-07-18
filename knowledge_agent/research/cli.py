@@ -15,7 +15,7 @@ from knowledge_agent.agents.claim_researcher import run_claim_research
 
 
 LOG_PATH = Path("logs") / "research.log"
-QUIET_LOGGERS = ("azure", "httpcore", "httpx", "msal", "openai")
+QUIET_LOGGERS = ("azure", "httpcore", "httpx", "msal", "openai", "snowflake")
 
 
 def build_parser() -> argparse.ArgumentParser:

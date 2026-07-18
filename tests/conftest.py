@@ -4,7 +4,12 @@ import pytest
 from pydantic_ai import models
 
 
-LIVE_MARKERS = ("live_nvidia", "live_azure", "live_api_key_ingestion")
+LIVE_MARKERS = (
+    "live_nvidia",
+    "live_azure",
+    "live_snowflake",
+    "live_api_key_ingestion",
+)
 
 
 @pytest.fixture(autouse=True)

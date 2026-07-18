@@ -8,7 +8,8 @@ from typing import Literal, cast
 from dotenv import load_dotenv
 
 
-DeploymentProfile = Literal["api_key", "azure_project"]
+DeploymentProfile = Literal["api_key", "azure_project", "snowflake"]
+DEFAULT_SNOWFLAKE_CONNECTION_NAME = "default"
 
 
 class ConfigurationError(Exception):
@@ -18,9 +19,10 @@ class ConfigurationError(Exception):
 def load_profile() -> DeploymentProfile:
     load_dotenv()
     value = required_env("KNOWLEDGE_AGENT_PROFILE").lower()
-    if value not in {"api_key", "azure_project"}:
+    if value not in {"api_key", "azure_project", "snowflake"}:
         raise ConfigurationError(
-            "KNOWLEDGE_AGENT_PROFILE must be 'api_key' or 'azure_project'"
+            "KNOWLEDGE_AGENT_PROFILE must be 'api_key', 'azure_project', "
+            "or 'snowflake'"
         )
     return cast(DeploymentProfile, value)
 

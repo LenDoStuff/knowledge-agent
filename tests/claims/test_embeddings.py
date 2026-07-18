@@ -36,21 +36,16 @@ class FakeDataFrame:
         ]
 
 
-def test_snowflake_ai_embedder_returns_ordered_embeddings(monkeypatch):
+def test_snowflake_ai_embedder_returns_ordered_embeddings():
     session = FakeSession()
-    monkeypatch.setattr(
-        "knowledge_agent.claims.embeddings.create_snowflake_session",
-        lambda connection_name: session,
-    )
     embedder = SnowflakeAiEmbedder(
-        connection_name="default",
+        session=session,
         embedding_model="snowflake-arctic-embed-l-v2.0",
     )
 
     embeddings = embedder.embed_texts(["alpha", "beta"])
-    embedder.close()
 
     assert embeddings == [[0.0, 5.0], [1.0, 4.0]]
     assert embedder.embedding_provider == "snowflake"
     assert embedder.embedding_model == "snowflake-arctic-embed-l-v2.0"
-    assert session.closed
+    assert not session.closed

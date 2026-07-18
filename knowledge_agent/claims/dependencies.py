@@ -37,13 +37,19 @@ from knowledge_agent.claims.models import (
     KnowledgeBaseEngine,
     RetrievalMode,
 )
-from knowledge_agent.claims.ocr import AzureDocumentIntelligenceOcrClient
+from knowledge_agent.claims.ocr import (
+    AzureDocumentIntelligenceOcrClient,
+    SnowflakeParseDocumentOcrClient,
+)
 from knowledge_agent.claims.pipeline import IngestionServices
 from knowledge_agent.claims.store import ClaimStore, load_claim_store
 from knowledge_agent.claims.vector_store import ChromaVectorStore
 from knowledge_agent.config import ConfigurationError
 from knowledge_agent.llm.config import LlmSettings
-from knowledge_agent.llm.providers import open_agent_runtime
+from knowledge_agent.llm.providers import (
+    create_snowflake_session,
+    open_agent_runtime,
+)
 
 
 LIGHTRAG_REBUILD_CACHE_FILE = ".lightrag-rebuild-cache.json"
@@ -69,7 +75,8 @@ def live_ingestion_services(
                 cast(str, settings.document_intelligence_api_key)
             )
             custom_mode: RetrievalMode = "lexical"
-        else:
+            ocr_client = AzureDocumentIntelligenceOcrClient(endpoint, credential)
+        elif llm_settings.profile == "azure_project":
             if runtime.azure_project is None or runtime.azure_credential is None:
                 raise ConfigurationError(
                     "azure_project profile requires Azure project clients"
@@ -89,11 +96,33 @@ def live_ingestion_services(
             )
             credential = runtime.azure_credential
             custom_mode = "semantic"
-            embedder = SnowflakeAiEmbedder(
+            session = _snowflake_session(
+                resources,
+                runtime,
                 settings.snowflake_connection_name,
+            )
+            embedder = SnowflakeAiEmbedder(
+                session,
                 settings.snowflake_embedding_model,
             )
-            resources.callback(embedder.close)
+            ocr_client = AzureDocumentIntelligenceOcrClient(endpoint, credential)
+        else:
+            session = getattr(runtime, "snowflake_session", None)
+            if session is None:
+                raise ConfigurationError(
+                    "snowflake profile requires a runtime Snowpark session"
+                )
+            custom_mode = "semantic"
+            embedder = SnowflakeAiEmbedder(
+                session,
+                settings.snowflake_embedding_model,
+            )
+            ocr_client = SnowflakeParseDocumentOcrClient(
+                session,
+                settings.snowflake_document_stage,
+            )
+
+        if custom_mode == "semantic":
 
             def vector_store_factory(root: Path) -> ChromaVectorStore:
                 return ChromaVectorStore(
@@ -119,7 +148,6 @@ def live_ingestion_services(
                     snowflake_embedder=embedder,
                 )
 
-        ocr_client = AzureDocumentIntelligenceOcrClient(endpoint, credential)
         resources.callback(ocr_client.close)
         yield IngestionServices(
             ocr_client=ocr_client,
@@ -185,11 +213,15 @@ def open_claim_store(
         with ExitStack() as resources:
             embedder = None
             if selected_spec.provider == "snowflake":
-                embedder = SnowflakeAiEmbedder(
+                session = _snowflake_session(
+                    resources,
+                    runtime,
                     settings.snowflake_connection_name,
+                )
+                embedder = SnowflakeAiEmbedder(
+                    session,
                     selected_spec.model,
                 )
-                resources.callback(embedder.close)
             lightrag = resources.enter_context(
                 open_lightrag_resource(
                     runtime,
@@ -213,11 +245,15 @@ def open_claim_store(
             "Only Snowflake embeddings are supported for semantic claims"
         )
     with ExitStack() as resources:
-        embedder = SnowflakeAiEmbedder(
+        session = _snowflake_session(
+            resources,
+            runtime,
             settings.snowflake_connection_name,
+        )
+        embedder = SnowflakeAiEmbedder(
+            session,
             manifest.embedding_model,
         )
-        resources.callback(embedder.close)
         vector_store = ChromaVectorStore(
             manifest.claim_id,
             claim_path / "index" / "chroma",
@@ -256,6 +292,9 @@ def rebuild_claim_knowledge_base(
             )
 
         with ExitStack() as resources:
+            runtime = None
+            if llm_settings.profile == "snowflake" or "lightrag" in retrieval_modes:
+                runtime = resources.enter_context(open_agent_runtime(llm_settings))
             embedder = None
             if "semantic" in retrieval_modes or (
                 selected_spec is not None and selected_spec.provider == "snowflake"
@@ -266,11 +305,15 @@ def rebuild_claim_knowledge_base(
                     if selected_spec is not None
                     else settings.snowflake_embedding_model
                 )
-                embedder = SnowflakeAiEmbedder(
+                session = _snowflake_session(
+                    resources,
+                    runtime,
                     settings.snowflake_connection_name,
+                )
+                embedder = SnowflakeAiEmbedder(
+                    session,
                     embedding_model,
                 )
-                resources.callback(embedder.close)
 
             if "semantic" in retrieval_modes:
                 if embedder is None:
@@ -290,7 +333,8 @@ def rebuild_claim_knowledge_base(
             if "lightrag" in retrieval_modes:
                 if selected_spec is None:
                     raise ValueError("LightRAG retrieval requires an embedding spec")
-                runtime = resources.enter_context(open_agent_runtime(llm_settings))
+                if runtime is None:
+                    raise ValueError("LightRAG rebuild requires an agent runtime")
                 index_lightrag_chunks(
                     runtime,
                     llm_settings,
@@ -372,6 +416,15 @@ def _retrieval_modes(
     if knowledge_base == "both":
         return (custom_mode, "lightrag")
     raise ValueError(f"Unknown knowledge-base engine: {knowledge_base}")
+
+
+def _snowflake_session(resources, runtime, connection_name: str):
+    session = getattr(runtime, "snowflake_session", None)
+    if session is not None:
+        return session
+    session = create_snowflake_session(connection_name)
+    resources.callback(session.close)
+    return session
 
 
 def _commit_rebuilt_index(

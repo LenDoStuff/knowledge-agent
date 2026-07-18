@@ -20,6 +20,10 @@ settings and owns the async model client behind a synchronous application API.
   with DeepSeek V4 Pro in deterministic non-thinking mode.
 - `azure_project` uses `OpenAIResponsesModel` against the Foundry project
   endpoint with browser authentication and the configured reasoning effort.
+- `snowflake` opens one Snowpark session from `SNOWFLAKE_CONNECTION_NAME`,
+  derives the account host, and uses `OpenAIChatModel` against
+  `/api/v2/cortex/v1` with `SNOWFLAKE_CORTEX_PAT`. The runtime owns that session
+  so OCR, embeddings, and LightRAG can reuse the same personal login.
 
 HTTP retries and fallback models are disabled. PydanticAI agents may use one
 explicit validation retry for malformed structured output or tool arguments.
@@ -31,3 +35,5 @@ it never creates a second raw text-generation client.
 Keep this package provider-focused. Claim prompts, tools, citation validation,
 and retrieval behavior belong in `agents/` or `claims/`. The runtime owns and
 closes its async client on the same event loop used for every agent request.
+Snowflake sessions are synchronous resources and close after the client and
+runtime loop finish.

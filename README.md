@@ -29,13 +29,48 @@ prompts stay in their owning agent packages.
 - `azure_project`: Azure AI Projects with browser authentication, a named
   Document Intelligence connection, Snowflake Cortex embeddings, and Chroma
   semantic retrieval.
+- `snowflake`: Snowflake Cortex REST through its OpenAI-compatible Chat
+  Completions endpoint, `AI_PARSE_DOCUMENT` OCR, Snowflake Cortex embeddings,
+  and Chroma semantic retrieval.
 
 Either profile can build Custom, embedded LightRAG, or both knowledge bases from
 the same persisted chunks. LightRAG reuses the selected profile's LLM through
 PydanticAI; `api_key` uses NVIDIA `nvidia/llama-nemotron-embed-1b-v2`
-embeddings and `azure_project` uses the configured Snowflake embedding model.
+embeddings; `azure_project` and `snowflake` use the configured Snowflake
+embedding model.
 
 Copy `.env.example` to `.env` and fill in the selected profile's values.
+
+The Snowflake profile reads account, user, role, warehouse, database, schema,
+and interactive authentication from a native named connection in
+`~/.snowflake/connections.toml` (or Snowflake Connector's Windows location).
+It requires `SNOWFLAKE_CORTEX_PAT` separately because the OpenAI-compatible REST
+endpoint requires a bearer token. The configured role must have
+`SNOWFLAKE.CORTEX_USER`, database/schema usage, and `CREATE STAGE` on the schema.
+The application creates `SNOWFLAKE_DOCUMENT_STAGE`, uploads each OCR input under
+a unique prefix, and removes that prefix after parsing; the empty managed stage
+remains available for later runs.
+
+```toml
+# ~/.snowflake/connections.toml
+[knowledge_agent]
+account = "org-account"
+user = "personal-user"
+authenticator = "externalbrowser"
+client_store_temporary_credential = true
+warehouse = "COMPUTE_WH"
+role = "KNOWLEDGE_AGENT_ROLE"
+database = "KNOWLEDGE_AGENT_DB"
+schema = "PUBLIC"
+```
+
+```dotenv
+KNOWLEDGE_AGENT_PROFILE=snowflake
+SNOWFLAKE_CONNECTION_NAME=knowledge_agent
+SNOWFLAKE_CORTEX_PAT=<programmatic-access-token>
+SNOWFLAKE_CORTEX_MODEL=<tool-capable-cortex-model>
+SNOWFLAKE_DOCUMENT_STAGE=KNOWLEDGE_AGENT_DOCUMENTS
+```
 
 ## Ingest a claim
 
@@ -101,8 +136,8 @@ through the UI. Existing claim IDs are not overwritten.
 python -m pytest
 ```
 
-Live provider contracts remain opt-in through `RUN_NVIDIA_CONTRACT_TEST=1`
-or `RUN_AZURE_CONTRACT_TEST=1`.
+Live provider contracts remain opt-in through `RUN_NVIDIA_CONTRACT_TEST=1`,
+`RUN_AZURE_CONTRACT_TEST=1`, or `RUN_SNOWFLAKE_CONTRACT_TEST=1`.
 
 ## Paid API-key ingestion runs
 

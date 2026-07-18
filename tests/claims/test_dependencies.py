@@ -52,6 +52,16 @@ def azure_llm_settings() -> LlmSettings:
     )
 
 
+def snowflake_llm_settings() -> LlmSettings:
+    return LlmSettings(
+        profile="snowflake",
+        model="claude-sonnet-4-5",
+        reasoning_effort="medium",
+        snowflake_connection_name="default",
+        snowflake_cortex_pat="secret-snowflake-pat",
+    )
+
+
 def claim_settings(**updates) -> ClaimSettings:
     values = {
         "data_root": Path("data/claims"),
@@ -181,6 +191,7 @@ def test_azure_project_profile_builds_snowflake_and_chroma(monkeypatch):
     credential = FakeResource()
     ocr = FakeResource()
     embedder = FakeEmbedder()
+    snowflake_session = FakeResource()
     monkeypatch.setattr(
         "knowledge_agent.claims.dependencies.open_agent_runtime",
         runtime_context(
@@ -196,7 +207,11 @@ def test_azure_project_profile_builds_snowflake_and_chroma(monkeypatch):
     )
     monkeypatch.setattr(
         "knowledge_agent.claims.dependencies.SnowflakeAiEmbedder",
-        lambda connection_name, model: embedder,
+        lambda session, model: embedder,
+    )
+    monkeypatch.setattr(
+        "knowledge_agent.claims.dependencies.create_snowflake_session",
+        lambda connection_name: snowflake_session,
     )
 
     with live_ingestion_services(
@@ -212,8 +227,63 @@ def test_azure_project_profile_builds_snowflake_and_chroma(monkeypatch):
         assert callable(services.vector_store_factory)
 
     assert connection_calls == [("document-intelligence", False)]
-    assert embedder.closed
+    assert snowflake_session.closed
     assert ocr.closed
+
+
+def test_snowflake_profile_shares_runtime_session_for_ocr_and_embeddings(monkeypatch):
+    session = FakeResource()
+    runtime = SimpleNamespace(
+        snowflake_session=session,
+        azure_project=None,
+        azure_credential=None,
+    )
+    ocr = FakeResource()
+    calls = []
+    monkeypatch.setattr(
+        "knowledge_agent.claims.dependencies.open_agent_runtime",
+        runtime_context(runtime),
+    )
+    monkeypatch.setattr(
+        "knowledge_agent.claims.dependencies.SnowflakeParseDocumentOcrClient",
+        lambda passed_session, stage: (
+            calls.append(("ocr", passed_session, stage)) or ocr
+        ),
+    )
+    monkeypatch.setattr(
+        "knowledge_agent.claims.dependencies.SnowflakeAiEmbedder",
+        lambda passed_session, model: (
+            calls.append(("embedder", passed_session, model)) or FakeEmbedder()
+        ),
+    )
+    monkeypatch.setattr(
+        "knowledge_agent.claims.dependencies.AzureDocumentIntelligenceOcrClient",
+        lambda *args: pytest.fail("snowflake profile must not construct Azure OCR"),
+    )
+    monkeypatch.setattr(
+        "knowledge_agent.claims.dependencies.create_snowflake_session",
+        lambda *args: pytest.fail("runtime Snowpark session must be reused"),
+    )
+
+    with live_ingestion_services(
+        "CLM-SNOWFLAKE",
+        claim_settings(
+            snowflake_embedding_model="snowflake-arctic-embed-l-v2.0"
+        ),
+        snowflake_llm_settings(),
+        "both",
+    ) as services:
+        assert services.retrieval_mode == "semantic"
+        assert services.additional_retrieval_modes == ("lightrag",)
+        assert services.embedding_provider == "snowflake"
+        assert services.embedder is not None
+
+    assert calls == [
+        ("embedder", session, "snowflake-arctic-embed-l-v2.0"),
+        ("ocr", session, "KNOWLEDGE_AGENT_DOCUMENTS"),
+    ]
+    assert ocr.closed
+    assert not session.closed
 
 
 def test_azure_project_rejects_connection_without_target(monkeypatch):
@@ -269,6 +339,7 @@ def test_semantic_claim_store_uses_manifest_model_and_closes_resources(
 
     embedder = SearchEmbedder()
     vector = SearchVector()
+    session = FakeResource()
     monkeypatch.setattr(
         "knowledge_agent.claims.dependencies.SnowflakeAiEmbedder",
         lambda connection, model: created.append((connection, model)) or embedder,
@@ -277,12 +348,16 @@ def test_semantic_claim_store_uses_manifest_model_and_closes_resources(
         "knowledge_agent.claims.dependencies.ChromaVectorStore",
         lambda claim_id, path: vector,
     )
+    monkeypatch.setattr(
+        "knowledge_agent.claims.dependencies.create_snowflake_session",
+        lambda connection_name: session,
+    )
 
     with open_claim_store(claim_path, claim_settings()) as store:
         assert search_claim(store, "repair", top_k=1)[0].chunk_id == (
             "DOC-002-CHUNK-001"
         )
 
-    assert created == [("default", "stored-model")]
-    assert embedder.closed
+    assert created == [(session, "stored-model")]
+    assert session.closed
     assert vector.closed

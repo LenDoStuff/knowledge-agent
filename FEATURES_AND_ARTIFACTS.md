@@ -13,6 +13,10 @@ claim PDFs into a self-contained claim knowledge base. It preserves the source
 documents, captures OCR text page by page, organizes logical documents, and
 extracts document metadata such as titles, types, parties, events, and concise
 summaries. Document summaries are limited to 200 words.
+OCR can use Azure Document Intelligence or Snowflake `AI_PARSE_DOCUMENT`, based
+on the active profile. Snowflake inputs are removed from the managed internal
+stage immediately after page extraction; the persisted page and citation shapes
+are identical across OCR providers.
 
 ### Claim knowledge-base inspection
 

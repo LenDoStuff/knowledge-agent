@@ -8,7 +8,7 @@ from concurrent.futures import Future
 from contextlib import contextmanager
 from dataclasses import dataclass
 from threading import Thread
-from typing import Any, Coroutine, TypeVar
+from typing import TYPE_CHECKING, Any, Coroutine, TypeVar, cast
 
 from azure.ai.projects import AIProjectClient
 from azure.identity import InteractiveBrowserCredential, get_bearer_token_provider
@@ -27,6 +27,10 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from knowledge_agent.llm.config import LlmSettings
 
 
+if TYPE_CHECKING:
+    from snowflake.snowpark import Session
+
+
 AZURE_AI_SCOPE = "https://ai.azure.com/.default"
 ResultT = TypeVar("ResultT")
 
@@ -42,6 +46,7 @@ class AgentRuntime:
     thread: Thread | None = None
     azure_project: AIProjectClient | None = None
     azure_credential: InteractiveBrowserCredential | None = None
+    snowflake_session: Session | None = None
 
     def run(self, agent: Agent[Any, Any], prompt: str, **kwargs: Any) -> Any:
         """Run a PydanticAI agent on this runtime's persistent event loop."""
@@ -79,6 +84,7 @@ def open_agent_runtime(settings: LlmSettings) -> Iterator[AgentRuntime]:
     thread.start()
     credential: InteractiveBrowserCredential | None = None
     project: AIProjectClient | None = None
+    snowflake_session: Session | None = None
     client: AsyncOpenAI | None = None
     try:
         if settings.profile == "api_key":
@@ -99,7 +105,7 @@ def open_agent_runtime(settings: LlmSettings) -> Iterator[AgentRuntime]:
                     },
                 ),
             )
-        else:
+        elif settings.profile == "azure_project":
             credential = create_browser_credential()
             project = AIProjectClient(
                 endpoint=settings.azure_ai_project_endpoint,
@@ -123,6 +129,29 @@ def open_agent_runtime(settings: LlmSettings) -> Iterator[AgentRuntime]:
                     openai_reasoning_effort=settings.reasoning_effort,
                 ),
             )
+        else:
+            connection_name = cast(str, settings.snowflake_connection_name)
+            snowflake_session = create_snowflake_session(connection_name)
+            host = str(snowflake_session.connection.host).strip().rstrip("/")
+            if not host:
+                raise ValueError(
+                    "The Snowflake named connection did not provide an account host"
+                )
+            client = AsyncOpenAI(
+                base_url=f"https://{host}/api/v2/cortex/v1",
+                api_key=cast(str, settings.snowflake_cortex_pat),
+                default_headers={
+                    "X-Snowflake-Authorization-Token-Type": (
+                        "PROGRAMMATIC_ACCESS_TOKEN"
+                    )
+                },
+                max_retries=0,
+            )
+            model = OpenAIChatModel(
+                settings.model,
+                provider=OpenAIProvider(openai_client=client),
+                settings=OpenAIChatModelSettings(temperature=0),
+            )
 
         yield AgentRuntime(
             model=model,
@@ -132,6 +161,7 @@ def open_agent_runtime(settings: LlmSettings) -> Iterator[AgentRuntime]:
             openai=client,
             azure_project=project,
             azure_credential=credential,
+            snowflake_session=snowflake_session,
         )
     finally:
         if client is not None:
@@ -140,9 +170,19 @@ def open_agent_runtime(settings: LlmSettings) -> Iterator[AgentRuntime]:
         thread.join()
         if project is not None:
             project.close()
+        if snowflake_session is not None:
+            snowflake_session.close()
         if credential is not None:
             credential.close()
 
 
 def create_browser_credential() -> InteractiveBrowserCredential:
     return InteractiveBrowserCredential()
+
+
+def create_snowflake_session(connection_name: str) -> Session:
+    """Open one Snowpark session from a native named connection."""
+
+    from snowflake.snowpark import Session
+
+    return Session.builder.config("connection_name", connection_name).create()

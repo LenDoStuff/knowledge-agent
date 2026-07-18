@@ -9,6 +9,7 @@ from knowledge_agent.claims.config import (
     load_claim_settings,
     require_ingestion_settings,
     validate_document_intelligence_endpoint,
+    validate_snowflake_stage_name,
 )
 from knowledge_agent.config import ConfigurationError
 
@@ -74,6 +75,18 @@ def test_azure_project_endpoint_rejects_regional_endpoint():
         )
 
 
+def test_snowflake_profile_requires_semantic_settings_and_valid_stage():
+    require_ingestion_settings(settings(), "snowflake")
+
+    with pytest.raises(ConfigurationError, match="SNOWFLAKE_CONNECTION_NAME"):
+        require_ingestion_settings(
+            settings(snowflake_connection_name=""),
+            "snowflake",
+        )
+    with pytest.raises(ConfigurationError, match="one unquoted"):
+        validate_snowflake_stage_name("database.schema.stage")
+
+
 def test_settings_load_mode_specific_document_intelligence_values(monkeypatch):
     for name in [
         "CLAIM_DATA_ROOT",
@@ -82,6 +95,7 @@ def test_settings_load_mode_specific_document_intelligence_values(monkeypatch):
         "AZURE_DOCUMENT_INTELLIGENCE_CONNECTION_NAME",
         "SNOWFLAKE_CONNECTION_NAME",
         "SNOWFLAKE_EMBEDDING_MODEL",
+        "SNOWFLAKE_DOCUMENT_STAGE",
     ]:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv(
@@ -99,5 +113,6 @@ def test_settings_load_mode_specific_document_intelligence_values(monkeypatch):
     assert configured.document_intelligence_api_key == "secret-test-key"
     assert configured.document_intelligence_connection_name == "document-intelligence"
     assert configured.snowflake_connection_name == "default"
+    assert configured.snowflake_document_stage == "KNOWLEDGE_AGENT_DOCUMENTS"
     assert configured.data_root == Path("data/claims")
     assert "secret-test-key" not in repr(configured)

@@ -1,7 +1,9 @@
 """Tests for PydanticAI provider models and runtime ownership."""
 
 import asyncio
+from types import SimpleNamespace
 
+import pytest
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIResponsesModel
 
 from knowledge_agent.llm.config import LlmSettings
@@ -32,12 +34,26 @@ def azure_settings() -> LlmSettings:
     )
 
 
+def snowflake_settings() -> LlmSettings:
+    return LlmSettings(
+        profile="snowflake",
+        model="claude-sonnet-4-5",
+        reasoning_effort="medium",
+        snowflake_connection_name="knowledge_agent",
+        snowflake_cortex_pat="secret-snowflake-pat",
+    )
+
+
 class FakeResource:
     def __init__(self) -> None:
         self.closed = False
 
     def close(self) -> None:
         self.closed = True
+
+
+class FakeSnowflakeSession(FakeResource):
+    connection = SimpleNamespace(host="org-account.snowflakecomputing.com")
 
 
 def test_browser_credential_factory_is_explicit(monkeypatch):
@@ -102,3 +118,50 @@ def test_runtime_builds_azure_responses_model_with_project_resources(monkeypatch
     assert client.is_closed()
     assert project.closed
     assert credential.closed
+
+
+def test_runtime_builds_snowflake_chat_model_and_closes_session(monkeypatch):
+    session = FakeSnowflakeSession()
+    calls = []
+
+    def create_session(connection_name):
+        calls.append(connection_name)
+        return session
+
+    monkeypatch.setattr(
+        "knowledge_agent.llm.providers.create_snowflake_session",
+        create_session,
+    )
+
+    with open_agent_runtime(snowflake_settings()) as runtime:
+        client = runtime.openai
+        assert isinstance(runtime.model, OpenAIChatModel)
+        assert runtime.snowflake_session is session
+        assert str(client.base_url) == (
+            "https://org-account.snowflakecomputing.com/api/v2/cortex/v1/"
+        )
+        assert client.default_headers[
+            "X-Snowflake-Authorization-Token-Type"
+        ] == "PROGRAMMATIC_ACCESS_TOKEN"
+        assert client.max_retries == 0
+        assert runtime.model.settings["temperature"] == 0
+        assert not session.closed
+
+    assert calls == ["knowledge_agent"]
+    assert client.is_closed()
+    assert session.closed
+
+
+def test_runtime_rejects_snowflake_connection_without_host(monkeypatch):
+    session = FakeSnowflakeSession()
+    session.connection = SimpleNamespace(host="")
+    monkeypatch.setattr(
+        "knowledge_agent.llm.providers.create_snowflake_session",
+        lambda connection_name: session,
+    )
+
+    with pytest.raises(ValueError, match="account host"):
+        with open_agent_runtime(snowflake_settings()):
+            pass
+
+    assert session.closed

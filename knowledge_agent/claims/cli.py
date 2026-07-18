@@ -14,7 +14,7 @@ from knowledge_agent.llm.config import load_llm_settings
 
 
 LOG_PATH = Path("logs") / "claims.log"
-QUIET_LOGGERS = ("azure", "httpcore", "httpx", "msal", "openai")
+QUIET_LOGGERS = ("azure", "httpcore", "httpx", "msal", "openai", "snowflake")
 
 
 def build_parser() -> argparse.ArgumentParser:

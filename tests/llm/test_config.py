@@ -16,6 +16,9 @@ ENV_NAMES = [
     "nvidia_api_key_ds4",
     "AZURE_AI_PROJECT_ENDPOINT",
     "AZURE_OPENAI_MODEL",
+    "SNOWFLAKE_CONNECTION_NAME",
+    "SNOWFLAKE_CORTEX_MODEL",
+    "SNOWFLAKE_CORTEX_PAT",
     "LLM_REASONING_EFFORT",
 ]
 
@@ -62,6 +65,26 @@ def test_azure_project_settings_select_azure_model(monkeypatch):
     assert settings.model == "deployment-name"
 
 
+def test_snowflake_settings_select_cortex_model_without_exposing_pat(monkeypatch):
+    set_environment(
+        monkeypatch,
+        {
+            "KNOWLEDGE_AGENT_PROFILE": "snowflake",
+            "SNOWFLAKE_CONNECTION_NAME": "knowledge_agent",
+            "SNOWFLAKE_CORTEX_MODEL": "claude-sonnet-4-5",
+            "SNOWFLAKE_CORTEX_PAT": "secret-snowflake-pat",
+        },
+    )
+
+    settings = load_llm_settings(load_profile())
+
+    assert settings.profile == "snowflake"
+    assert llm_provider(settings) == "snowflake"
+    assert settings.model == "claude-sonnet-4-5"
+    assert settings.snowflake_connection_name == "knowledge_agent"
+    assert "secret-snowflake-pat" not in repr(settings)
+
+
 @pytest.mark.parametrize(
     ("environment", "message"),
     [
@@ -89,6 +112,20 @@ def test_azure_project_settings_select_azure_model(monkeypatch):
                 "LLM_REASONING_EFFORT": "extreme",
             },
             "LLM_REASONING_EFFORT",
+        ),
+        (
+            {
+                "KNOWLEDGE_AGENT_PROFILE": "snowflake",
+                "SNOWFLAKE_CORTEX_PAT": "secret",
+            },
+            "SNOWFLAKE_CORTEX_MODEL",
+        ),
+        (
+            {
+                "KNOWLEDGE_AGENT_PROFILE": "snowflake",
+                "SNOWFLAKE_CORTEX_MODEL": "claude-sonnet-4-5",
+            },
+            "SNOWFLAKE_CORTEX_PAT",
         ),
     ],
 )

@@ -8,12 +8,14 @@ from typing import Literal, cast
 
 from knowledge_agent.config import (
     ConfigurationError,
+    DEFAULT_SNOWFLAKE_CONNECTION_NAME,
     DeploymentProfile,
+    optional_env,
     required_env,
 )
 
 
-LlmProvider = Literal["nvidia", "azure"]
+LlmProvider = Literal["nvidia", "azure", "snowflake"]
 ReasoningEffort = Literal["low", "medium", "high"]
 NVIDIA_DEEPSEEK_MODEL = "deepseek-ai/deepseek-v4-pro"
 
@@ -26,6 +28,8 @@ class LlmSettings:
     nvidia_base_url: str | None = None
     nvidia_api_key_ds4: str | None = field(default=None, repr=False)
     azure_ai_project_endpoint: str | None = None
+    snowflake_connection_name: str | None = None
+    snowflake_cortex_pat: str | None = field(default=None, repr=False)
 
 
 def load_llm_settings(profile: DeploymentProfile) -> LlmSettings:
@@ -42,13 +46,29 @@ def load_llm_settings(profile: DeploymentProfile) -> LlmSettings:
             nvidia_api_key_ds4=required_env("nvidia_api_key_ds4"),
         )
 
+    if profile == "azure_project":
+        return LlmSettings(
+            profile=profile,
+            model=required_env("AZURE_OPENAI_MODEL"),
+            reasoning_effort=cast(ReasoningEffort, reasoning_effort),
+            azure_ai_project_endpoint=required_env("AZURE_AI_PROJECT_ENDPOINT"),
+        )
+
     return LlmSettings(
         profile=profile,
-        model=required_env("AZURE_OPENAI_MODEL"),
+        model=required_env("SNOWFLAKE_CORTEX_MODEL"),
         reasoning_effort=cast(ReasoningEffort, reasoning_effort),
-        azure_ai_project_endpoint=required_env("AZURE_AI_PROJECT_ENDPOINT"),
+        snowflake_connection_name=(
+            optional_env("SNOWFLAKE_CONNECTION_NAME")
+            or DEFAULT_SNOWFLAKE_CONNECTION_NAME
+        ),
+        snowflake_cortex_pat=required_env("SNOWFLAKE_CORTEX_PAT"),
     )
 
 
 def llm_provider(settings: LlmSettings) -> LlmProvider:
-    return "nvidia" if settings.profile == "api_key" else "azure"
+    if settings.profile == "api_key":
+        return "nvidia"
+    if settings.profile == "azure_project":
+        return "azure"
+    return "snowflake"

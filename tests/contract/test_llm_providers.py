@@ -2,14 +2,16 @@
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from pydantic_ai import Agent
 
-from knowledge_agent.claims.store import load_claim_store
 from knowledge_agent.agents.claim_researcher import run_claim_research
+from knowledge_agent.claims.ocr import SnowflakeParseDocumentOcrClient
+from knowledge_agent.claims.store import load_claim_store
 from knowledge_agent.llm.config import LlmSettings
 from knowledge_agent.llm.providers import open_agent_runtime
 
@@ -19,6 +21,13 @@ SAMPLE_OUTPUT = (
     Path(__file__).parents[2] / "examples" / "claims" / "sample_output"
 )
 GOLDEN_DATASET = Path(__file__).parents[2] / "evals" / "azure_research.json"
+SAMPLE_PDF = (
+    Path(__file__).parents[2]
+    / "examples"
+    / "claims"
+    / "sample_input"
+    / "00_claim_file_index.pdf"
+)
 
 
 class CityAnswer(BaseModel):
@@ -80,6 +89,20 @@ def azure_settings() -> LlmSettings:
     )
 
 
+def snowflake_settings() -> LlmSettings:
+    model = os.getenv("SNOWFLAKE_CORTEX_MODEL")
+    pat = os.getenv("SNOWFLAKE_CORTEX_PAT")
+    if not model or not pat:
+        pytest.fail("SNOWFLAKE_CORTEX_MODEL and SNOWFLAKE_CORTEX_PAT are required")
+    return LlmSettings(
+        profile="snowflake",
+        model=model,
+        reasoning_effort="medium",
+        snowflake_connection_name=os.getenv("SNOWFLAKE_CONNECTION_NAME", "default"),
+        snowflake_cortex_pat=pat,
+    )
+
+
 @pytest.mark.live_azure
 @pytest.mark.skipif(
     os.getenv("RUN_AZURE_CONTRACT_TEST") != "1",
@@ -87,6 +110,40 @@ def azure_settings() -> LlmSettings:
 )
 def test_azure_structured_output_contract():
     assert_city_contract(azure_settings())
+
+
+@pytest.mark.live_snowflake
+@pytest.mark.skipif(
+    os.getenv("RUN_SNOWFLAKE_CONTRACT_TEST") != "1",
+    reason="set RUN_SNOWFLAKE_CONTRACT_TEST=1 to call Snowflake Cortex",
+)
+def test_snowflake_structured_output_contract():
+    assert_city_contract(snowflake_settings())
+
+
+@pytest.mark.live_snowflake
+@pytest.mark.skipif(
+    os.getenv("RUN_SNOWFLAKE_CONTRACT_TEST") != "1",
+    reason="set RUN_SNOWFLAKE_CONTRACT_TEST=1 to call Snowflake OCR",
+)
+def test_snowflake_ocr_contract(monkeypatch):
+    run_id = "contract-ocr"
+    monkeypatch.setattr(
+        "knowledge_agent.claims.ocr.uuid4",
+        lambda: SimpleNamespace(hex=run_id),
+    )
+    stage = os.getenv("SNOWFLAKE_DOCUMENT_STAGE", "KNOWLEDGE_AGENT_DOCUMENTS")
+    with open_agent_runtime(snowflake_settings()) as runtime:
+        assert runtime.snowflake_session is not None
+        client = SnowflakeParseDocumentOcrClient(runtime.snowflake_session, stage)
+        pages = client.extract_pages("SNOWFLAKE-CONTRACT", SAMPLE_PDF)
+        remaining = runtime.snowflake_session.sql(
+            f"LIST @{stage}/knowledge-agent/{run_id}"
+        ).collect()
+
+    assert pages
+    assert pages[0].page_number == 1
+    assert remaining == []
 
 
 @pytest.mark.live_azure

@@ -41,4 +41,5 @@ markers = [
     "live_api_key_ingestion: calls NVIDIA and Azure Document Intelligence",
     "live_nvidia: calls NVIDIA DeepSeek V4 Pro",
     "live_azure: calls the configured live Azure AI Projects deployment",
+    "live_snowflake: calls Snowflake Cortex REST or AI_PARSE_DOCUMENT",
 ]

@@ -29,8 +29,11 @@ The active deployment profile comes from `KNOWLEDGE_AGENT_PROFILE`:
   retrieval for claims.
 - `azure_project` uses PydanticAI with Azure AI Projects, Document Intelligence,
   Snowflake Cortex embeddings, and Chroma semantic retrieval.
+- `snowflake` uses PydanticAI with Snowflake Cortex REST, staged
+  `AI_PARSE_DOCUMENT` OCR, Snowflake Cortex embeddings, and Chroma semantic
+  retrieval. One runtime-owned Snowpark session is shared by claim services.
 
-Both profiles can create the Custom engine, embedded LightRAG, or both. Each
+All profiles can create the Custom engine, embedded LightRAG, or both. Each
 index uses the existing claim chunks and stable citation IDs. When both exist,
 each Streamlit research interaction explicitly selects one engine and persists
 that choice in its audit snapshot.
